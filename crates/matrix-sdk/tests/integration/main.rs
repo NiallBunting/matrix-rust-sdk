@@ -16,6 +16,7 @@ use wiremock::{
 };
 
 mod client;
+mod encryption;
 mod matrix_auth;
 mod refresh_token;
 mod room;
