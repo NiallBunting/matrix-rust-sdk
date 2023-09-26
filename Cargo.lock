@@ -1668,6 +1668,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-secret-storage"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures-util",
+ "matrix-sdk",
+ "tokio",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "example-timeline"
 version = "0.1.0"
 dependencies = [
