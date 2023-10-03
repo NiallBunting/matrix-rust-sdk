@@ -36,10 +36,10 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, instrument, trace, warn};
 
 use crate::{
-    olm::{InboundGroupSession, SignedJsonObject},
+    olm::{BackedUpRoomKey, ExportedRoomKey, InboundGroupSession, SignedJsonObject},
     store::{BackupDecryptionKey, BackupKeys, Changes, RoomKeyCounts, Store},
     types::{MegolmV1AuthData, RoomKeyBackupInfo, Signatures},
-    CryptoStoreError, Device, KeysBackupRequest, OutgoingRequest,
+    CryptoStoreError, Device, KeysBackupRequest, OutgoingRequest, RoomKeyImportResult,
 };
 
 mod keys;
@@ -554,6 +554,32 @@ impl BackupMachine {
         }
 
         (backup, session_record)
+    }
+
+    pub async fn import_backed_up_room_keys(
+        &self,
+        room_keys: BTreeMap<OwnedRoomId, BTreeMap<String, BackedUpRoomKey>>,
+        progress_listener: impl Fn(usize, usize),
+    ) -> Result<RoomKeyImportResult, CryptoStoreError> {
+        let mut decrypted_room_keys = vec![];
+
+        for (room_id, room_keys) in room_keys {
+            for (session_id, room_key) in room_keys {
+                let room_key = ExportedRoomKey {
+                    algorithm: room_key.algorithm,
+                    room_id: room_id.to_owned(),
+                    sender_key: room_key.sender_key,
+                    session_id,
+                    session_key: room_key.session_key,
+                    sender_claimed_keys: room_key.sender_claimed_keys,
+                    forwarding_curve25519_key_chain: room_key.forwarding_curve25519_key_chain,
+                };
+
+                decrypted_room_keys.push(room_key);
+            }
+        }
+
+        self.store.import_room_keys(decrypted_room_keys, true, progress_listener).await
     }
 }
 
