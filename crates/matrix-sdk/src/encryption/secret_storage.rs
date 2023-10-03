@@ -63,7 +63,7 @@ use std::{fmt, string::FromUtf8Error};
 
 use matrix_sdk_base::crypto::{
     secret_storage::{DecodeError, MacError, SecretStorageKey},
-    CrossSigningKeyExport, CryptoStoreError, SecretImportError,
+    CrossSigningKeyExport, CryptoStoreError, OlmMachine, SecretImportError,
 };
 use ruma::{
     events::{
@@ -81,8 +81,9 @@ use thiserror::Error;
 use tracing::{
     error,
     field::{debug, display},
-    info, instrument, Span,
+    info, instrument, warn, Span,
 };
+use zeroize::Zeroize;
 
 use super::identities::ManualVerifyError;
 use crate::Client;
@@ -418,6 +419,21 @@ impl SecretStore {
         Ok(export)
     }
 
+    #[allow(dead_code)]
+    async fn maybe_enable_backups(&self) -> Result<()> {
+        if let Some(mut secret) = self.get_secret(&SecretName::RecoveryKey).await? {
+            if let Err(e) = self.client.encryption().backups().maybe_enable_backups(&secret).await {
+                warn!("Could not enable backups {e:?}");
+            }
+
+            secret.zeroize()
+        } else {
+            info!("No backup recovery key found.");
+        }
+
+        Ok(())
+    }
+
     /// Retrieve and store well-known secrets locally
     ///
     /// This method retrieves and stores all well-known secrets from the account
@@ -491,9 +507,6 @@ impl SecretStore {
         let (request_id, request) = olm_machine.query_keys_for_users([olm_machine.user_id()]);
         self.client.keys_query(&request_id, request.device_keys).await?;
 
-        // TODO: Import the backup key here as well if it exists and enable backups if
-        // the current backup version is trusted, or expose a different method for this?
-
         // Let's now try to import our private cross-signing keys.
         let status = olm_machine.import_cross_signing_keys(export).await?;
 
@@ -521,6 +534,9 @@ impl SecretStore {
                 error!("Couldn't find our own device in the store");
             }
         }
+
+        // TODO: Import the backup key here as well if it exists and enable backups.
+        // self.maybe_enable_backups().await?;
 
         Ok(())
     }
