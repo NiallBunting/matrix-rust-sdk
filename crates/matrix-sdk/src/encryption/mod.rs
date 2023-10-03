@@ -66,6 +66,7 @@ use crate::{
     Client, Error, Result, Room, TransmissionProgress,
 };
 
+pub mod backups;
 mod futures;
 pub mod identities;
 pub mod secret_storage;
@@ -83,6 +84,7 @@ pub use matrix_sdk_base::crypto::{
 
 pub use self::futures::PrepareEncryptedFile;
 use self::{
+    backups::Backups,
     identities::{DeviceUpdates, IdentityUpdates},
     secret_storage::SecretStore,
 };
@@ -988,6 +990,10 @@ impl Encryption {
         let import = task.await.expect("Task join error")?;
 
         Ok(olm.import_room_keys(import, false, |_, _| {}).await?)
+    }
+
+    pub(crate) fn backups(&self) -> Backups {
+        Backups { client: self.client.to_owned() }
     }
 
     /// Enables the crypto-store cross-process lock.

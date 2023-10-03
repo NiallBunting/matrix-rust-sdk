@@ -1,0 +1,323 @@
+// Copyright 2023 The Matrix.org Foundation C.I.C.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! TODO
+
+use std::collections::BTreeMap;
+
+use futures_util::{pin_mut, StreamExt};
+use matrix_sdk_base::crypto::{
+    olm::BackedUpRoomKey, store::BackupDecryptionKey, types::RoomKeyBackupInfo, OlmMachine,
+};
+use ruma::{
+    api::client::backup::{
+        create_backup_version, get_backup_keys, get_backup_keys_for_session, get_latest_backup_info,
+    },
+    events::secret::request::SecretName,
+    serde::Raw,
+    OwnedRoomId,
+};
+use tracing::{info, instrument, warn};
+
+use crate::Client;
+
+#[derive(Debug)]
+pub struct Backups {
+    pub(super) client: Client,
+}
+
+impl Backups {
+    pub async fn create_or_reset(&self) -> Result<(), crate::Error> {
+        let decryption_key = BackupDecryptionKey::new().unwrap();
+
+        let backup_key = decryption_key.megolm_v1_public_key();
+
+        let algorithm = Raw::new(&backup_key.as_backup_algorithm())?.cast();
+        let request = create_backup_version::v3::Request::new(algorithm);
+        let response = self.client.send(request, Default::default()).await?;
+        let version = response.version;
+
+        let olm_machine = self.client.olm_machine().await;
+        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
+
+        olm_machine
+            .backup_machine()
+            .save_decryption_key(Some(decryption_key), Some(version.to_owned()))
+            .await?;
+
+        backup_key.set_version(version);
+        olm_machine.backup_machine().enable_backup_v1(backup_key).await?;
+
+        Ok(())
+    }
+
+    #[instrument]
+    pub(crate) async fn maybe_enable_backups(
+        &self,
+        maybe_recovery_key: &str,
+    ) -> Result<bool, crate::Error> {
+        let olm_machine = self.client.olm_machine().await;
+        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
+
+        let decryption_key = BackupDecryptionKey::from_base64(&maybe_recovery_key).unwrap();
+
+        let current_version = self.get_current_version().await;
+        let backup_info: RoomKeyBackupInfo = current_version.algorithm.deserialize_as().unwrap();
+
+        let ret = if decryption_key.backup_key_matches(&backup_info) {
+            let backup_key = decryption_key.megolm_v1_public_key();
+
+            let result = olm_machine.backup_machine().verify_backup(backup_info, false).await;
+
+            if let Ok(result) = result {
+                info!("Signature verification on the latest backup version {result:?}");
+
+                // TODO: What's the point of checking if the backup is signed by our master key,
+                // if we received the secret from secret storage or from secret send, is this
+                // some remnant where we used to enable backups without having
+                // access to the recovery key?
+                if result.trusted() {
+                    info!(
+                        "The backup is trusted and we have the correct recovery key, \
+                         storing the recovery key and enabling backups"
+                    );
+                    backup_key.set_version(current_version.version.to_owned());
+
+                    olm_machine
+                        .backup_machine()
+                        .save_decryption_key(
+                            Some(decryption_key.to_owned()),
+                            Some(current_version.version.to_owned()),
+                        )
+                        .await
+                        .unwrap();
+                    olm_machine.backup_machine().enable_backup_v1(backup_key).await.unwrap();
+
+                    // TODO: Start backing up keys now.
+                    // TODO: Download all keys now, or just leave this task for
+                    // when we have a decryption failure?
+                    self.download_all_room_keys(decryption_key, current_version.version).await;
+
+                    true
+                } else {
+                    warn!("Found an active backup but the backup is not trusted.");
+
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            warn!(
+                "Found an active backup but the recovery key we received isn't the one used in \
+                 this backup version"
+            );
+
+            false
+        };
+
+        Ok(ret)
+    }
+
+    async fn maybe_resume_backup(
+        &self,
+        decryption_key: BackupDecryptionKey,
+        version: Option<String>,
+    ) -> Result<bool, crate::Error> {
+        let olm_machine = self.client.olm_machine().await;
+        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
+
+        let current_version = self.get_current_version().await;
+        let backup_info: RoomKeyBackupInfo = current_version.algorithm.deserialize_as().unwrap();
+
+        if decryption_key.backup_key_matches(&backup_info) {
+            let backup_key = decryption_key.megolm_v1_public_key();
+            olm_machine.backup_machine().enable_backup_v1(backup_key).await.unwrap();
+
+            if let Some(version) = version {
+                if current_version.version != version {
+                    olm_machine
+                        .backup_machine()
+                        .save_decryption_key(None, Some(current_version.version.to_owned()))
+                        .await
+                        .unwrap();
+                }
+            }
+
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn get_current_version(&self) -> get_latest_backup_info::v3::Response {
+        let request = get_latest_backup_info::v3::Request::new();
+        let response = self.client.send(request, Default::default()).await.unwrap();
+
+        response
+    }
+
+    async fn resume_backup_from_stored_backup_key(
+        &self,
+        olm_machine: &OlmMachine,
+    ) -> Result<bool, crate::Error> {
+        let backup_keys = olm_machine.store().load_backup_keys().await.unwrap();
+
+        if let Some(decryption_key) = backup_keys.decryption_key {
+            self.maybe_resume_backup(decryption_key, backup_keys.backup_version).await
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn maybe_resume_from_secret_inbox(&self, olm_machine: &OlmMachine) {
+        let secrets =
+            olm_machine.store().get_secrets_from_inbox(&SecretName::RecoveryKey).await.unwrap();
+
+        for secret in secrets {
+            if self.maybe_enable_backups(&secret.event.content.secret).await.unwrap() {
+                break;
+            }
+        }
+
+        olm_machine.store().delete_secrets_from_inbox(&SecretName::RecoveryKey).await.unwrap();
+    }
+
+    /// Check and re-enable a backup if we have a backup recovery key locally.
+    async fn maybe_resume_backups(&self) -> Result<(), crate::Error> {
+        let olm_machine = self.client.olm_machine().await;
+        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
+
+        // Let us first check if we have a stored backup recovery key and a backup
+        // version.
+        if !self.resume_backup_from_stored_backup_key(olm_machine).await? {
+            // We didn't manage to enable backups from a stored backup recovery key, let us
+            // check our secret inbox. Perhaps we can find a valid key there.
+            self.maybe_resume_from_secret_inbox(olm_machine).await;
+        }
+
+        Ok(())
+    }
+
+    /// Listener which watches received secrets over `m.secret.send` and tries
+    /// to enable backups if we have received a [`SecretName::RecoveryKey`].
+    async fn secret_send_listener(&self) {
+        let olm_machine = self.client.olm_machine().await;
+        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
+
+        // TODO: Because of our crude multi-process support, which reloads the whole
+        // [`OlmMachine`] this stream might stop giving you updates, make sure to
+        // either:
+        // 1. Recreate the stream.
+        // 2. Listen to `m.secret.send` events using the event handler mechanism in the
+        //    client.
+        let stream = olm_machine.store().secrets_stream();
+        pin_mut!(stream);
+
+        while let Some(secret) = stream.next().await {
+            if secret.secret_name == SecretName::RecoveryKey {
+                if self.maybe_enable_backups(&secret.event.content.secret).await.unwrap() {
+                    olm_machine
+                        .store()
+                        .delete_secrets_from_inbox(&secret.secret_name)
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+    }
+
+    async fn backup_room_keys(&self) -> Result<(), crate::Error> {
+        // TODO: Lock this, so we're uploading only one per client.
+
+        let olm_machine = self.client.olm_machine().await;
+        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
+
+        while let Some((request_id, request)) = olm_machine.backup_machine().backup().await? {
+            let request = ruma::api::client::backup::add_backup_keys::v3::Request::new(
+                request.version,
+                request.rooms,
+            );
+
+            let response = self.client.send(request, Default::default()).await?;
+
+            olm_machine.mark_request_as_sent(&request_id, &response).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn download_room_key(&self, room_id: OwnedRoomId, session_id: String) {
+        let olm_machine = self.client.olm_machine().await;
+        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
+
+        let backup_keys = olm_machine.store().load_backup_keys().await.unwrap();
+
+        if let Some(decryption_key) = backup_keys.decryption_key {
+            if let Some(version) = backup_keys.backup_version {
+                let request = get_backup_keys_for_session::v3::Request::new(
+                    version,
+                    room_id.to_owned(),
+                    session_id.to_owned(),
+                );
+                let response = self.client.send(request, Default::default()).await.unwrap();
+
+                let room_key = response.key_data.deserialize().unwrap();
+
+                let room_key = decryption_key.decrypt_session_data(room_key.session_data).unwrap();
+                let room_key: BackedUpRoomKey = serde_json::from_slice(&room_key).unwrap();
+
+                let room_keys =
+                    BTreeMap::from([(room_id, BTreeMap::from([(session_id, room_key)]))]);
+
+                olm_machine
+                    .backup_machine()
+                    .import_backed_up_room_keys(room_keys, |_, _| {})
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
+    // TODO: Remove this, this will be slow. Don't be a plonker.
+    async fn download_all_room_keys(&self, recovery_key: BackupDecryptionKey, version: String) {
+        let request = get_backup_keys::v3::Request::new(version);
+        let response = self.client.send(request, Default::default()).await.unwrap();
+
+        let olm_machine = self.client.olm_machine().await;
+        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
+
+        let mut decrypted_room_keys: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
+
+        for (room_id, room_keys) in response.rooms {
+            for (session_id, room_key) in room_keys.sessions {
+                let room_key = room_key.deserialize().unwrap();
+
+                let room_key = recovery_key.decrypt_session_data(room_key.session_data).unwrap();
+                let room_key: BackedUpRoomKey = serde_json::from_slice(&room_key).unwrap();
+
+                decrypted_room_keys
+                    .entry(room_id.to_owned())
+                    .or_default()
+                    .insert(session_id, room_key);
+            }
+        }
+
+        olm_machine
+            .backup_machine()
+            .import_backed_up_room_keys(decrypted_room_keys, |_, _| {})
+            .await
+            .unwrap();
+    }
+}
