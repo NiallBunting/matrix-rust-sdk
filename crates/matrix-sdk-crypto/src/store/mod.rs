@@ -1523,9 +1523,8 @@ impl Store {
     /// imported into our store. If we already have a better version of a key
     /// the key will *not* be imported.
     ///
-    /// Returns a tuple of numbers that represent the number of sessions that
-    /// were imported and the total number of sessions that were found in the
-    /// key export.
+    /// Returns a [`RoomKeyImportResult`] containing information about room keys
+    /// which were imported.
     ///
     /// # Examples
     ///
@@ -1537,9 +1536,10 @@ impl Store {
     /// # async {
     /// # let machine = OlmMachine::new(&alice, device_id!("DEVICEID")).await;
     /// # let export = Cursor::new("".to_owned());
-    /// let exported_keys = decrypt_room_key_export(export, "1234").unwrap();
-    /// machine.import_room_keys(exported_keys, false, |_, _| {}).await.unwrap();
-    /// # };
+    /// let exported_keys = decrypt_room_key_export(export, "1234")?;
+    /// machine.import_room_keys(exported_keys, false, |_, _| {}).await?;
+    /// # anyhow::Ok(())
+    /// # }
     /// ```
     pub async fn import_exported_room_keys(
         &self,

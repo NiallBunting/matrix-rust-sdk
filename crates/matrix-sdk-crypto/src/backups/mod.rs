@@ -556,6 +556,32 @@ impl BackupMachine {
         (backup, session_record)
     }
 
+    /// Import the given room keys into our store.
+    ///
+    /// # Arguments
+    ///
+    /// * `room_keys` - A list of previously exported keys that should be
+    /// imported into our store. If we already have a better version of a key
+    /// the key will *not* be imported.
+    ///
+    /// Returns a [`RoomKeyImportResult`] containing information about room keys
+    /// which were imported.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use std::io::Cursor;
+    /// # use matrix_sdk_crypto::{OlmMachine, decrypt_room_key_export};
+    /// # use ruma::{device_id, user_id};
+    /// # let alice = user_id!("@alice:example.org");
+    /// # async {
+    /// # let machine = OlmMachine::new(&alice, device_id!("DEVICEID")).await;
+    /// # let export = Cursor::new("".to_owned());
+    /// let exported_keys = decrypt_room_key_export(export, "1234")?;
+    /// machine.backup_machine().import_backed_up_room_keys(exported_keys, |_, _| {}).await?;
+    /// # anyhow::Ok(())
+    /// # }
+    /// ```
     pub async fn import_backed_up_room_keys(
         &self,
         room_keys: BTreeMap<OwnedRoomId, BTreeMap<String, BackedUpRoomKey>>,

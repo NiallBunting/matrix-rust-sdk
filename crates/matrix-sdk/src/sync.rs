@@ -252,6 +252,7 @@ impl Client {
 
         // TODO: We should not do this every time, only if we receive room keys in the
         // sync response, though it's not harmful as the OlmMachine knows what to do.
+        #[cfg(feature = "e2e-encryption")]
         self.encryption().backups().maybe_trigger_backup();
 
         debug!("Ran notification handlers in {:?}", now.elapsed());

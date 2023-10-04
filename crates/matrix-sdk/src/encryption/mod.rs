@@ -996,6 +996,7 @@ impl Encryption {
         Ok(ret)
     }
 
+    /// Get the backups manager of the client.
     pub fn backups(&self) -> Backups {
         Backups { client: self.client.to_owned() }
     }

@@ -1,12 +1,6 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
-use matrix_sdk::{
-    config::SyncSettings,
-    encryption::secret_storage::SecretStore,
-    matrix_auth::{MatrixSession, MatrixSessionTokens},
-    ruma::{events::secret::request::SecretName, OwnedDeviceId, OwnedUserId},
-    AuthSession, Client, SessionMeta,
-};
+use clap::Parser;
+use matrix_sdk::{config::SyncSettings, encryption::secret_storage::SecretStore, Client};
 use url::Url;
 
 /// A command line example showcasing how the secret storage support works in
@@ -66,7 +60,7 @@ async fn import_known_secrets(client: &Client, secret_store: SecretStore) -> Res
 }
 
 async fn login(cli: &Cli) -> Result<Client> {
-    let builder = Client::builder().homeserver_url(cli.homeserver.to_owned());
+    let builder = Client::builder().homeserver_url(&cli.homeserver);
 
     let builder = if let Some(proxy) = &cli.proxy { builder.proxy(proxy) } else { builder };
 
@@ -102,6 +96,4 @@ async fn main() -> Result<()> {
             eprintln!("Error syncing, what the fuck is going on with this synapse {e:?}")
         }
     }
-
-    Ok(())
 }

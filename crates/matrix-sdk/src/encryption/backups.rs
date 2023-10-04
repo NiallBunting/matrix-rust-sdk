@@ -16,7 +16,6 @@
 
 use std::collections::BTreeMap;
 
-use futures_util::{pin_mut, StreamExt};
 use matrix_sdk_base::crypto::{
     olm::BackedUpRoomKey, store::BackupDecryptionKey, types::RoomKeyBackupInfo, GossippedSecret,
     OlmMachine,
@@ -44,8 +43,9 @@ impl Backups {
         let decryption_key = BackupDecryptionKey::new().unwrap();
 
         let backup_key = decryption_key.megolm_v1_public_key();
+        let backup_info = decryption_key.as_room_key_backup_info();
 
-        let algorithm = Raw::new(&backup_key.as_backup_algorithm())?.cast();
+        let algorithm = Raw::new(&backup_info)?.cast();
         let request = create_backup_version::v3::Request::new(algorithm);
         let response = self.client.send(request, Default::default()).await?;
         let version = response.version;
@@ -81,7 +81,7 @@ impl Backups {
         let olm_machine = self.client.olm_machine().await;
         let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
 
-        let decryption_key = BackupDecryptionKey::from_base64(&maybe_recovery_key).unwrap();
+        let decryption_key = BackupDecryptionKey::from_base64(maybe_recovery_key).unwrap();
 
         let current_version = self.get_current_version().await;
         let backup_info: RoomKeyBackupInfo = current_version.algorithm.deserialize_as().unwrap();
@@ -175,9 +175,7 @@ impl Backups {
 
     async fn get_current_version(&self) -> get_latest_backup_info::v3::Response {
         let request = get_latest_backup_info::v3::Request::new();
-        let response = self.client.send(request, Default::default()).await.unwrap();
-
-        response
+        self.client.send(request, Default::default()).await.unwrap()
     }
 
     async fn resume_backup_from_stored_backup_key(
@@ -232,26 +230,6 @@ impl Backups {
         // listen to the secrets stream.
         if let Some(olm_machine) = olm_machine.as_ref() {
             client.encryption().backups().maybe_resume_from_secret_inbox(olm_machine).await;
-        }
-    }
-
-    /// Listener which watches received secrets over `m.secret.send` and tries
-    /// to enable backups if we have received a [`SecretName::RecoveryKey`].
-    async fn secret_send_listener(&self) {
-        let olm_machine = self.client.olm_machine().await;
-        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
-
-        // TODO: Because of our crude multi-process support, which reloads the whole
-        // [`OlmMachine`] this stream might stop giving you updates, make sure to
-        // either:
-        // 1. Recreate the stream.
-        // 2. Listen to `m.secret.send` events using the event handler mechanism in the
-        //    client.
-        let stream = olm_machine.store().secrets_stream();
-        pin_mut!(stream);
-
-        while let Some(secret) = stream.next().await {
-            self.handle_received_secret(secret).await;
         }
     }
 

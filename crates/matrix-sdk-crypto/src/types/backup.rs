@@ -37,6 +37,8 @@ pub struct MegolmV1AuthData {
 }
 
 impl MegolmV1AuthData {
+    /// Create a new [`MegolmV1AuthData`] from the `Curve25519PublicKey` which
+    /// is used as the backup key and signatures.
     pub fn new(public_key: Curve25519PublicKey, signatures: Signatures) -> Self {
         Self { public_key, signatures, extra: Default::default() }
     }

@@ -148,8 +148,6 @@ async fn sync(client: Client) -> matrix_sdk::Result<()> {
             eprintln!("Error syncing {e:?}");
         }
     }
-
-    Ok(())
 }
 
 #[derive(Parser, Debug)]

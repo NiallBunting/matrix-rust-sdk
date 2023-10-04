@@ -1698,7 +1698,7 @@ impl OlmMachine {
     /// # };
     /// ```
     #[deprecated(
-        since = "0.7",
+        since = "0.7.0",
         note = "Use the OlmMachine::store::import_exported_room_keys method instead"
     )]
     pub async fn import_room_keys(

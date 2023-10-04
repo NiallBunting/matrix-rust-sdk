@@ -27,7 +27,10 @@ use super::{
     compat::{Error as DecryptionError, Message, PkDecryption},
     MegolmV1BackupKey,
 };
-use crate::{store::BackupDecryptionKey, types::RoomKeyBackupInfo};
+use crate::{
+    store::BackupDecryptionKey,
+    types::{MegolmV1AuthData, RoomKeyBackupInfo},
+};
 
 /// Error type for the decoding of a [`BackupDecryptionKey`].
 #[derive(Debug, Error)]
@@ -210,6 +213,8 @@ impl BackupDecryptionKey {
         Ok(String::from_utf8_lossy(&decrypted).to_string())
     }
 
+    /// Try to decrypt the given session data using this
+    /// [`BackupDecryptionKey`].
     pub fn decrypt_session_data(
         &self,
         session_data: SessionData,
@@ -217,6 +222,7 @@ impl BackupDecryptionKey {
         let message = Message {
             ciphertext: session_data.ciphertext.into_inner(),
             mac: session_data.mac.into_inner(),
+            // TODO: Remove the unwrap.
             ephemeral_key: Curve25519PublicKey::from_slice(session_data.ephemeral.as_bytes())
                 .unwrap(),
         };
@@ -226,6 +232,8 @@ impl BackupDecryptionKey {
         pk.decrypt(&message)
     }
 
+    /// Check if the given public key from the [`RoomKeyBackupInfo`] matches to
+    /// this [`BackupDecryptionKey`].
     pub fn backup_key_matches(&self, info: &RoomKeyBackupInfo) -> bool {
         match info {
             RoomKeyBackupInfo::MegolmBackupV1Curve25519AesSha2(info) => {
@@ -236,6 +244,16 @@ impl BackupDecryptionKey {
             }
             RoomKeyBackupInfo::Other { .. } => false,
         }
+    }
+
+    /// Create a [`RoomKeyBackupInfo`] from this [`BackupDecryptionKey`].
+    ///
+    /// This can be used to upload and enable the backup on the homeserver.
+    pub fn as_room_key_backup_info(&self) -> RoomKeyBackupInfo {
+        let public_key = self.get_pk_decryption().public_key();
+        let auth_data = MegolmV1AuthData::new(public_key, Default::default());
+
+        RoomKeyBackupInfo::MegolmBackupV1Curve25519AesSha2(auth_data)
     }
 }
 

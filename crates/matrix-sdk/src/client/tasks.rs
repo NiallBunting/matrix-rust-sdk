@@ -23,28 +23,34 @@ use crate::{
     Client,
 };
 
-/// Struct foobar.
 pub(crate) struct ClientTasks {
+    #[cfg(feature = "e2e-encryption")]
     pub(crate) upload_room_keys: BackupUploadingTask,
 }
 
 impl ClientTasks {
     pub(crate) fn new(client: Weak<ClientInner>) -> Self {
-        Self { upload_room_keys: BackupUploadingTask::new(client) }
+        Self {
+            #[cfg(feature = "e2e-encryption")]
+            upload_room_keys: BackupUploadingTask::new(client),
+        }
     }
 }
 
+#[cfg(feature = "e2e-encryption")]
 pub(crate) struct BackupUploadingTask {
     sender: mpsc::UnboundedSender<()>,
     join_handle: JoinHandle<()>,
 }
 
+#[cfg(feature = "e2e-encryption")]
 impl Drop for BackupUploadingTask {
     fn drop(&mut self) {
         self.join_handle.abort();
     }
 }
 
+#[cfg(feature = "e2e-encryption")]
 impl BackupUploadingTask {
     pub fn new(client: Weak<ClientInner>) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -61,7 +67,7 @@ impl BackupUploadingTask {
     }
 
     pub async fn listen(client: Weak<ClientInner>, mut receiver: UnboundedReceiver<()>) {
-        while let Some(_) = receiver.recv().await {
+        while receiver.recv().await.is_some() {
             trace!("Received a command to backup room keys");
 
             if let Some(client) = client.upgrade() {
