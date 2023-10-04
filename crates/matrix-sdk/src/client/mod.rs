@@ -88,7 +88,9 @@ use crate::{encryption::Encryption, store_locks::CrossProcessStoreLock};
 
 mod builder;
 mod futures;
+mod tasks;
 
+use self::tasks::ClientTasks;
 pub use self::{
     builder::{ClientBuildError, ClientBuilder},
     futures::SendRequest,
@@ -217,6 +219,7 @@ pub(crate) struct ClientInner {
     /// to ensure that only a single call to a method happens at once or to
     /// deduplicate multiple calls to a method.
     locks: ClientLocks,
+    pub(crate) tasks: StdMutex<Option<ClientTasks>>,
     pub(crate) typing_notice_times: DashMap<OwnedRoomId, Instant>,
     /// Event handlers. See `add_event_handler`.
     pub(crate) event_handlers: EventHandlerStore,
@@ -249,14 +252,15 @@ impl ClientInner {
         base_client: BaseClient,
         server_versions: Option<Box<[MatrixVersion]>>,
         respect_login_well_known: bool,
-    ) -> Self {
-        Self {
-            homeserver: StdRwLock::new(homeserver),
+    ) -> Arc<Self> {
+        let mut client = Self {
+            homeserver: RwLock::new(homeserver),
             auth_ctx,
             #[cfg(feature = "experimental-sliding-sync")]
             sliding_sync_proxy: StdRwLock::new(sliding_sync_proxy),
             http_client,
             base_client,
+            tasks: StdMutex::new(None),
             locks: Default::default(),
             server_versions: OnceCell::new_with(server_versions),
             typing_notice_times: Default::default(),
@@ -265,7 +269,17 @@ impl ClientInner {
             room_update_channels: Default::default(),
             respect_login_well_known,
             sync_beat: event_listener::Event::new(),
-        }
+        };
+
+        let client = Arc::new(client);
+        let weak_client = Arc::downgrade(&client);
+
+        // TODO: Should we use MaybeUninit here to get rid of the option?
+        let tasks = ClientTasks::new(weak_client);
+
+        *client.tasks.lock().unwrap() = Some(tasks);
+
+        client
     }
 }
 
@@ -1919,7 +1933,7 @@ impl Client {
     /// Create a new specialized `Client` that can process notifications.
     pub async fn notification_client(&self) -> Result<Client> {
         let client = Client {
-            inner: Arc::new(ClientInner::new(
+            inner: ClientInner::new(
                 self.inner.auth_ctx.clone(),
                 self.homeserver(),
                 #[cfg(feature = "experimental-sliding-sync")]
@@ -1928,7 +1942,7 @@ impl Client {
                 self.inner.base_client.clone_with_in_memory_state_store(),
                 self.inner.server_versions.get().cloned(),
                 self.inner.respect_login_well_known,
-            )),
+            ),
         };
 
         // Copy the parent's session meta into the child. This initializes the in-memory

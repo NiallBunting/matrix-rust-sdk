@@ -36,7 +36,7 @@ use ruma::{
     serde::Raw,
     OwnedRoomId, RoomId,
 };
-use tracing::{debug, error, warn};
+use tracing::{debug, error, trace, warn};
 
 use crate::{event_handler::HandlerKind, Client, Result, Room};
 
@@ -249,6 +249,10 @@ impl Client {
         for fut in futures {
             fut.await;
         }
+
+        // TODO: We should not do this every time, only if we receive room keys in the
+        // sync response.
+        self.encryption().backups().maybe_trigger_backup();
 
         debug!("Ran notification handlers in {:?}", now.elapsed());
 

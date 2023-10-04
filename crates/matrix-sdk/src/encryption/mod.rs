@@ -989,10 +989,14 @@ impl Encryption {
         let task = tokio::task::spawn_blocking(decrypt);
         let import = task.await.expect("Task join error")?;
 
-        Ok(olm.import_room_keys(import, false, |_, _| {}).await?)
+        let ret = olm.store().import_exported_room_keys(import, |_, _| {}).await?;
+
+        self.backups().maybe_trigger_backup();
+
+        Ok(ret)
     }
 
-    pub(crate) fn backups(&self) -> Backups {
+    pub fn backups(&self) -> Backups {
         Backups { client: self.client.to_owned() }
     }
 

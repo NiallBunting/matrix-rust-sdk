@@ -536,7 +536,7 @@ impl SecretStore {
         }
 
         // TODO: Import the backup key here as well if it exists and enable backups.
-        // self.maybe_enable_backups().await?;
+        self.maybe_enable_backups().await?;
 
         Ok(())
     }
