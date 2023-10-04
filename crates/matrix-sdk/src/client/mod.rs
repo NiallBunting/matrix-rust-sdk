@@ -253,7 +253,7 @@ impl ClientInner {
         server_versions: Option<Box<[MatrixVersion]>>,
         respect_login_well_known: bool,
     ) -> Arc<Self> {
-        let mut client = Self {
+        let client = Self {
             homeserver: RwLock::new(homeserver),
             auth_ctx,
             #[cfg(feature = "experimental-sliding-sync")]
@@ -276,7 +276,6 @@ impl ClientInner {
 
         // TODO: Should we use MaybeUninit here to get rid of the option?
         let tasks = ClientTasks::new(weak_client);
-
         *client.tasks.lock().unwrap() = Some(tasks);
 
         client
@@ -913,6 +912,15 @@ impl Client {
             #[cfg(feature = "experimental-oidc")]
             AuthSession::Oidc(s) => self.oidc().restore_session(s).await,
         }
+    }
+
+    pub(crate) async fn set_session_meta(&self, session_meta: SessionMeta) -> Result<()> {
+        self.base_client().set_session_meta(session_meta).await?;
+
+        #[cfg(feature = "e2e-encryption")]
+        self.encryption().backups().setup().await?;
+
+        Ok(())
     }
 
     /// Refresh the access token using the authentication API used to log into

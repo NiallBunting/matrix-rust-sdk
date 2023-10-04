@@ -712,7 +712,7 @@ impl Oidc {
             authorization_data: Default::default(),
         };
 
-        self.client.base_client().set_session_meta(meta).await?;
+        self.client.set_session_meta(meta).await?;
         self.deferred_enable_cross_process_refresh_lock().await?;
 
         self.client
@@ -911,7 +911,7 @@ impl Oidc {
             device_id: whoami_res.device_id.ok_or(OidcError::MissingDeviceId)?,
         };
 
-        self.client.base_client().set_session_meta(session).await.map_err(crate::Error::from)?;
+        self.client.set_session_meta(session).await.map_err(crate::Error::from)?;
         self.deferred_enable_cross_process_refresh_lock().await?;
 
         if let Some(cross_process_manager) = self.ctx().cross_process_token_refresh_manager.get() {

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use matrix_sdk::{
+    config::SyncSettings,
     encryption::secret_storage::SecretStore,
     matrix_auth::{MatrixSession, MatrixSessionTokens},
     ruma::{events::secret::request::SecretName, OwnedDeviceId, OwnedUserId},
@@ -96,7 +97,11 @@ async fn main() -> Result<()> {
 
     import_known_secrets(&client, secret_store).await?;
 
-    client.sync(Default::default()).await?;
+    loop {
+        if let Err(e) = client.sync(SyncSettings::new()).await {
+            eprintln!("Error syncing, what the fuck is going on with this synapse {e:?}")
+        }
+    }
 
     Ok(())
 }

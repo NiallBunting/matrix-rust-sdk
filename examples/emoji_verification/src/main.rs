@@ -143,7 +143,11 @@ async fn sync(client: Client) -> matrix_sdk::Result<()> {
         }
     });
 
-    client.sync(SyncSettings::new()).await?;
+    loop {
+        if let Err(e) = client.sync(SyncSettings::new()).await {
+            eprintln!("Error syncing {e:?}");
+        }
+    }
 
     Ok(())
 }

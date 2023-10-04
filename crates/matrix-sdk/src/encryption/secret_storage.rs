@@ -63,7 +63,7 @@ use std::{fmt, string::FromUtf8Error};
 
 use matrix_sdk_base::crypto::{
     secret_storage::{DecodeError, MacError, SecretStorageKey},
-    CrossSigningKeyExport, CryptoStoreError, OlmMachine, SecretImportError,
+    CrossSigningKeyExport, CryptoStoreError, SecretImportError,
 };
 use ruma::{
     events::{
