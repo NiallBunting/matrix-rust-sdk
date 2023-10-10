@@ -937,6 +937,8 @@ impl CryptoStore for SqliteCryptoStore {
     }
 
     async fn reset_backup_state(&self) -> Result<()> {
+        // TODO: Delete the backup keys as well?
+
         Ok(self.acquire().await?.reset_inbound_group_session_backup_state().await?)
     }
 

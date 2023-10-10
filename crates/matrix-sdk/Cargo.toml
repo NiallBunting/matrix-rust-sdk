@@ -73,7 +73,7 @@ cfg-vis = "0.3.0"
 chrono = { version = "0.4.23", optional = true }
 dashmap = { workspace = true }
 event-listener = "3.0.0"
-eyeball = { workspace = true }
+eyeball = { workspace = true, features = ["async-lock"] }
 eyeball-im = { workspace = true }
 eyeball-im-util = { workspace = true, optional = true }
 eyre = { version = "0.6.8", optional = true }

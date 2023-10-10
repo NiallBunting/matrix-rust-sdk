@@ -14,8 +14,9 @@
 
 #![allow(missing_docs)]
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, pin::Pin};
 
+use eyeball::ObservableWriteGuard;
 use matrix_sdk_base::crypto::{
     olm::BackedUpRoomKey, store::BackupDecryptionKey, types::RoomKeyBackupInfo, GossippedSecret,
     OlmMachine,
@@ -29,14 +30,34 @@ use ruma::{
     serde::Raw,
     OwnedRoomId,
 };
-use tracing::{info, instrument, trace, warn};
+use tracing::{info, instrument, trace, warn, Span};
 
 use crate::Client;
+
+#[derive(Debug)]
+pub enum BackupState {
+    Unknown,
+    FetchingVersion,
+    Enabling,
+    Enabled,
+    Disabling,
+    Disabled,
+}
+
+impl Default for BackupState {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
 
 #[derive(Debug)]
 pub struct Backups {
     pub(super) client: Client,
 }
+
+// TODO:
+// 1. Automatically create a backup if it doesn't exist
+// 2. Some type of observable telling the application in which state we're in
 
 impl Backups {
     pub async fn create_or_reset(&self) -> Result<(), crate::Error> {
@@ -64,6 +85,45 @@ impl Backups {
         Ok(())
     }
 
+    #[instrument(skip_all, fields(version))]
+    pub async fn delete(&self) -> Result<(), crate::Error> {
+        // TODO: Only delete if we're not disabled.
+
+        let olm_machine = self.client.olm_machine().await;
+        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
+
+        let backup_keys = olm_machine.backup_machine().get_backup_keys().await?;
+
+        if let Some(version) = backup_keys.backup_version {
+            let mut guard = self.client.inner.backups_state.write().await;
+            ObservableWriteGuard::set(&mut guard, BackupState::Disabling);
+
+            Span::current().record("version", &version);
+
+            info!("Disabling and deleting backup");
+
+            // TODO: If we fail at any point we should go back to a different state.
+
+            olm_machine.backup_machine().disable_backup().await?;
+
+            info!("Backup successfully disabled");
+
+            let request =
+                ruma::api::client::backup::delete_backup_version::v3::Request::new(version);
+
+            self.client.send(request, Default::default()).await?;
+
+            info!("Backup successfully disabled and deleted");
+            let mut guard = self.client.inner.backups_state.write().await;
+
+            ObservableWriteGuard::set(&mut guard, BackupState::Disabled);
+        } else {
+            info!("Backup is not enabled, can't disable it");
+        }
+
+        Ok(())
+    }
+
     pub(crate) async fn setup(&self) -> Result<(), crate::Error> {
         info!("Setting up secret listeners and trying to resume backups");
 
@@ -85,8 +145,13 @@ impl Backups {
 
         let current_version = self.get_current_version().await;
         let backup_info: RoomKeyBackupInfo = current_version.algorithm.deserialize_as().unwrap();
+        let stored_keys = olm_machine.backup_machine().get_backup_keys().await?;
 
-        let ret = if decryption_key.backup_key_matches(&backup_info) {
+        let ret = if stored_keys.backup_version.as_ref() == Some(&current_version.version)
+            && stored_keys.decryption_key.as_ref() == Some(&decryption_key)
+        {
+            todo!("Backups are already enabled")
+        } else if decryption_key.backup_key_matches(&backup_info) {
             let backup_key = decryption_key.megolm_v1_public_key();
 
             let result = olm_machine.backup_machine().verify_backup(backup_info, false).await;

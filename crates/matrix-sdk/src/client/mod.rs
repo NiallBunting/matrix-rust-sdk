@@ -23,7 +23,7 @@ use std::{
 };
 
 use dashmap::DashMap;
-use eyeball::{SharedObservable, Subscriber};
+use eyeball::{AsyncLock, SharedObservable, Subscriber};
 use futures_core::Stream;
 #[cfg(feature = "e2e-encryption")]
 use matrix_sdk_base::crypto::store::LockableCryptoStore;
@@ -72,6 +72,7 @@ use crate::{
     authentication::{AuthCtx, AuthData, ReloadSessionCallback, SaveSessionCallback},
     config::RequestConfig,
     deduplicating_handler::DeduplicatingHandler,
+    encryption::backups::BackupState,
     error::{HttpError, HttpResult},
     event_handler::{
         EventHandler, EventHandlerDropGuard, EventHandlerHandle, EventHandlerStore, SyncEvent,
@@ -235,6 +236,7 @@ pub(crate) struct ClientInner {
     /// wait for the sync to get the data to fetch a room object from the state
     /// store.
     pub(crate) sync_beat: event_listener::Event,
+    pub(crate) backups_state: SharedObservable<BackupState, AsyncLock>,
 }
 
 impl ClientInner {
@@ -254,7 +256,7 @@ impl ClientInner {
         respect_login_well_known: bool,
     ) -> Arc<Self> {
         let client = Self {
-            homeserver: RwLock::new(homeserver),
+            homeserver: StdRwLock::new(homeserver),
             auth_ctx,
             #[cfg(feature = "experimental-sliding-sync")]
             sliding_sync_proxy: StdRwLock::new(sliding_sync_proxy),
@@ -269,6 +271,7 @@ impl ClientInner {
             room_update_channels: Default::default(),
             respect_login_well_known,
             sync_beat: event_listener::Event::new(),
+            backups_state: SharedObservable::new_async(Default::default()),
         };
 
         let client = Arc::new(client);

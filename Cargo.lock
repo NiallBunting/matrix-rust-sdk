@@ -1726,6 +1726,9 @@ checksum = "42482893d982111055ce4b24234d6250396d3785767c6b04cedd84612a0b80fb"
 dependencies = [
  "futures-core",
  "readlock",
+ "readlock-tokio",
+ "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -4735,6 +4738,15 @@ name = "readlock"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7b323e7196daa571c8584de958be19e92941c41f845776fe06babfe8fa280a2"
+
+[[package]]
+name = "readlock-tokio"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fba3368906521936a0fe277bfb082c066c8a86c05e0a9cc9aa117473b32983fd"
+dependencies = [
+ "tokio",
+]
 
 [[package]]
 name = "redox_syscall"

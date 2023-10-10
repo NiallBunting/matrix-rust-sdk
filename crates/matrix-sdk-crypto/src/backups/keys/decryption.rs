@@ -18,7 +18,8 @@ use std::{
 };
 
 use bs58;
-use ruma::api::client::backup::SessionData;
+use ruma::api::client::backup::EncryptedSessionData;
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 use vodozemac::Curve25519PublicKey;
 use zeroize::Zeroizing;
@@ -91,6 +92,14 @@ impl std::fmt::Display for BackupDecryptionKey {
         );
 
         write!(f, "{}", string.as_str())
+    }
+}
+
+impl PartialEq for BackupDecryptionKey {
+    fn eq(&self, other: &Self) -> bool {
+        let choice = self.inner.ct_eq(other.inner.as_ref());
+
+        choice.into()
     }
 }
 
@@ -217,7 +226,7 @@ impl BackupDecryptionKey {
     /// [`BackupDecryptionKey`].
     pub fn decrypt_session_data(
         &self,
-        session_data: SessionData,
+        session_data: EncryptedSessionData,
     ) -> Result<Vec<u8>, DecryptionError> {
         let message = Message {
             ciphertext: session_data.ciphertext.into_inner(),
