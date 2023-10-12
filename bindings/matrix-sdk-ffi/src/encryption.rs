@@ -25,6 +25,7 @@ pub trait BackupStateListener: Sync + Send {
 #[derive(uniffi::Enum)]
 pub enum BackupState {
     Unknown,
+    Creating,
     Enabling,
     Resuming,
     Enabled,
@@ -37,6 +38,7 @@ impl From<backups::BackupState> for BackupState {
     fn from(value: backups::BackupState) -> Self {
         match value {
             backups::BackupState::Unknown => BackupState::Unknown,
+            backups::BackupState::Creating => BackupState::Creating,
             backups::BackupState::Enabling => BackupState::Enabling,
             backups::BackupState::Resuming => BackupState::Resuming,
             backups::BackupState::Enabled => BackupState::Enabled,

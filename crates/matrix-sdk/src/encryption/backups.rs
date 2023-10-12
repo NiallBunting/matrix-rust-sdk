@@ -19,8 +19,8 @@ use std::collections::BTreeMap;
 use eyeball::ObservableWriteGuard;
 use futures_core::Stream;
 use matrix_sdk_base::crypto::{
-    olm::BackedUpRoomKey, store::BackupDecryptionKey, types::RoomKeyBackupInfo, GossippedSecret,
-    OlmMachine,
+    backups::MegolmV1BackupKey, olm::BackedUpRoomKey, store::BackupDecryptionKey,
+    types::RoomKeyBackupInfo, GossippedSecret, OlmMachine,
 };
 use ruma::{
     api::client::backup::{
@@ -40,6 +40,7 @@ use crate::Client;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackupState {
     Unknown,
+    Creating,
     Enabling,
     Resuming,
     Enabled,
@@ -71,7 +72,21 @@ impl Backups {
         ObservableWriteGuard::set(&mut guard, state);
     }
 
+    async fn enable(
+        &self,
+        olm_machine: &OlmMachine,
+        backup_key: MegolmV1BackupKey,
+    ) -> Result<(), crate::Error> {
+        olm_machine.backup_machine().enable_backup_v1(backup_key).await?;
+
+        self.set_state(BackupState::Enabled);
+
+        Ok(())
+    }
+
     pub async fn create_or_reset(&self) -> Result<(), crate::Error> {
+        self.set_state(BackupState::Creating);
+
         let decryption_key = BackupDecryptionKey::new().unwrap();
 
         let backup_key = decryption_key.megolm_v1_public_key();
@@ -91,7 +106,7 @@ impl Backups {
             .await?;
 
         backup_key.set_version(version);
-        olm_machine.backup_machine().enable_backup_v1(backup_key).await?;
+        self.enable(olm_machine, backup_key).await?;
 
         Ok(())
     }
@@ -446,13 +461,6 @@ impl Backups {
         let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
 
         self.handle_downloaded_room_keys(response, decryption_key, olm_machine).await;
-    }
-
-    pub async fn is_enabled(&self) -> bool {
-        let olm_machine = self.client.olm_machine().await;
-        let Some(olm_machine) = olm_machine.as_ref() else { return false };
-
-        olm_machine.backup_machine().enabled().await
     }
 
     pub fn state_stream(&self) -> impl Stream<Item = BackupState> {
