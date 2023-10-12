@@ -1,6 +1,11 @@
 use anyhow::Result;
 use clap::Parser;
-use matrix_sdk::{config::SyncSettings, encryption::secret_storage::SecretStore, Client};
+use futures_util::{pin_mut, StreamExt};
+use matrix_sdk::{
+    config::SyncSettings,
+    encryption::{backups::BackupState, secret_storage::SecretStore},
+    Client,
+};
 use url::Url;
 
 /// A command line example showcasing how the secret storage support works in
@@ -50,12 +55,6 @@ async fn import_known_secrets(client: &Client, secret_store: SecretStore) -> Res
         eprintln!("Couldn't import all the cross-signing keys: {status:?}");
     }
 
-    if client.encryption().backups().is_enabled().await {
-        println!("Successfully imported the backup recovery key and enabled backups");
-    } else {
-        eprintln!("Couldn't import the backup recovery key");
-    }
-
     Ok(())
 }
 
@@ -75,6 +74,23 @@ async fn login(cli: &Cli) -> Result<Client> {
     Ok(client)
 }
 
+async fn listen_for_backup_state_changes(client: Client) {
+    let stream = client.encryption().backups().state_stream();
+    pin_mut!(stream);
+
+    while let Some(state) = stream.next().await {
+        match state {
+            BackupState::Unknown => (),
+            BackupState::Enabling => println!("Trying to enable backups"),
+            BackupState::Resuming => println!("Trying to resume backups"),
+            BackupState::Enabled => println!("Successfully enabled backups"),
+            BackupState::Downloading => println!("Downloading the room keys from the backup"),
+            BackupState::Disabling => println!("Disabling the backup"),
+            BackupState::Disabled => println!("Backup successfully disabled"),
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -88,6 +104,11 @@ async fn main() -> Result<()> {
     client.sync_once(Default::default()).await?;
 
     let secret_store = client.encryption().open_secret_store(&cli.secret_store_key).await?;
+
+    let _task = tokio::spawn({
+        let client = client.to_owned();
+        async move { listen_for_backup_state_changes(client.to_owned()).await }
+    });
 
     import_known_secrets(&client, secret_store).await?;
 

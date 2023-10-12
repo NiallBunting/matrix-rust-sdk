@@ -23,7 +23,7 @@ use std::{
 };
 
 use dashmap::DashMap;
-use eyeball::{AsyncLock, SharedObservable, Subscriber};
+use eyeball::{SharedObservable, Subscriber};
 use futures_core::Stream;
 #[cfg(feature = "e2e-encryption")]
 use matrix_sdk_base::crypto::store::LockableCryptoStore;
@@ -236,7 +236,7 @@ pub(crate) struct ClientInner {
     /// wait for the sync to get the data to fetch a room object from the state
     /// store.
     pub(crate) sync_beat: event_listener::Event,
-    pub(crate) backups_state: SharedObservable<BackupState, AsyncLock>,
+    pub(crate) backups_state: SharedObservable<BackupState>,
 }
 
 impl ClientInner {
@@ -271,7 +271,7 @@ impl ClientInner {
             room_update_channels: Default::default(),
             respect_login_well_known,
             sync_beat: event_listener::Event::new(),
-            backups_state: SharedObservable::new_async(Default::default()),
+            backups_state: SharedObservable::new(Default::default()),
         };
 
         let client = Arc::new(client);

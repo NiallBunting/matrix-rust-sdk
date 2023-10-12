@@ -14,9 +14,10 @@
 
 #![allow(missing_docs)]
 
-use std::{collections::BTreeMap, pin::Pin};
+use std::collections::BTreeMap;
 
 use eyeball::ObservableWriteGuard;
+use futures_core::Stream;
 use matrix_sdk_base::crypto::{
     olm::BackedUpRoomKey, store::BackupDecryptionKey, types::RoomKeyBackupInfo, GossippedSecret,
     OlmMachine,
@@ -34,12 +35,15 @@ use tracing::{info, instrument, trace, warn, Span};
 
 use crate::Client;
 
-#[derive(Debug)]
+// TODO: Do we want to attach some data to these states? I.e. the backup
+// version?
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackupState {
     Unknown,
-    FetchingVersion,
     Enabling,
+    Resuming,
     Enabled,
+    Downloading,
     Disabling,
     Disabled,
 }
@@ -58,8 +62,15 @@ pub struct Backups {
 // TODO:
 // 1. Automatically create a backup if it doesn't exist
 // 2. Some type of observable telling the application in which state we're in
+// 3. Disable and mark that backups should stay disabled via a custom account
+//    data event.
 
 impl Backups {
+    fn set_state(&self, state: BackupState) {
+        let mut guard = self.client.inner.backups_state.write();
+        ObservableWriteGuard::set(&mut guard, state);
+    }
+
     pub async fn create_or_reset(&self) -> Result<(), crate::Error> {
         let decryption_key = BackupDecryptionKey::new().unwrap();
 
@@ -86,7 +97,7 @@ impl Backups {
     }
 
     #[instrument(skip_all, fields(version))]
-    pub async fn delete(&self) -> Result<(), crate::Error> {
+    pub async fn disable(&self) -> Result<(), crate::Error> {
         // TODO: Only delete if we're not disabled.
 
         let olm_machine = self.client.olm_machine().await;
@@ -95,9 +106,6 @@ impl Backups {
         let backup_keys = olm_machine.backup_machine().get_backup_keys().await?;
 
         if let Some(version) = backup_keys.backup_version {
-            let mut guard = self.client.inner.backups_state.write().await;
-            ObservableWriteGuard::set(&mut guard, BackupState::Disabling);
-
             Span::current().record("version", &version);
 
             info!("Disabling and deleting backup");
@@ -114,9 +122,6 @@ impl Backups {
             self.client.send(request, Default::default()).await?;
 
             info!("Backup successfully disabled and deleted");
-            let mut guard = self.client.inner.backups_state.write().await;
-
-            ObservableWriteGuard::set(&mut guard, BackupState::Disabled);
         } else {
             info!("Backup is not enabled, can't disable it");
         }
@@ -138,6 +143,8 @@ impl Backups {
         &self,
         maybe_recovery_key: &str,
     ) -> Result<bool, crate::Error> {
+        self.set_state(BackupState::Enabling);
+
         let olm_machine = self.client.olm_machine().await;
         let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
 
@@ -183,16 +190,22 @@ impl Backups {
                     // TODO: Start backing up keys now.
                     // TODO: Download all keys now, or just leave this task for
                     // when we have a decryption failure?
+                    self.set_state(BackupState::Downloading);
                     self.download_all_room_keys(decryption_key, current_version.version).await;
                     self.maybe_trigger_backup();
+
+                    self.set_state(BackupState::Enabled);
 
                     true
                 } else {
                     warn!("Found an active backup but the backup is not trusted.");
 
+                    self.set_state(BackupState::Disabled);
+
                     false
                 }
             } else {
+                self.set_state(BackupState::Disabled);
                 false
             }
         } else {
@@ -200,6 +213,7 @@ impl Backups {
                 "Found an active backup but the recovery key we received isn't the one used in \
                  this backup version"
             );
+            self.set_state(BackupState::Disabled);
 
             false
         };
@@ -439,5 +453,13 @@ impl Backups {
         let Some(olm_machine) = olm_machine.as_ref() else { return false };
 
         olm_machine.backup_machine().enabled().await
+    }
+
+    pub fn state_stream(&self) -> impl Stream<Item = BackupState> {
+        self.client.inner.backups_state.subscribe_reset()
+    }
+
+    pub fn state(&self) -> BackupState {
+        self.client.inner.backups_state.get()
     }
 }
