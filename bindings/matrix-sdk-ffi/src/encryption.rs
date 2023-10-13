@@ -70,6 +70,12 @@ impl Encryption {
     }
 
     pub async fn disable_backups(&self) -> Result<(), ClientError> {
+        // TODO: This should delete the 4S stuff as well.
         Ok(self.inner.backups().disable().await?)
+    }
+
+    pub async fn enable_backups(&self) -> Result<(), ClientError> {
+        // TODO: This should create a new secret storage key.
+        Ok(self.inner.backups().create().await?)
     }
 }

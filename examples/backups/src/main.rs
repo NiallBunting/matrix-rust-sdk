@@ -74,6 +74,10 @@ async fn login(cli: &Cli) -> Result<Client> {
     Ok(client)
 }
 
+async fn disable(client: Client) {
+    client.encryption().backups().disable().await.expect("Unable to disable backups");
+}
+
 async fn listen_for_backup_state_changes(client: Client) {
     let stream = client.encryption().backups().state_stream();
     pin_mut!(stream);
@@ -83,7 +87,13 @@ async fn listen_for_backup_state_changes(client: Client) {
             BackupState::Unknown => (),
             BackupState::Enabling => println!("Trying to enable backups"),
             BackupState::Resuming => println!("Trying to resume backups"),
-            BackupState::Enabled => println!("Successfully enabled backups"),
+            BackupState::Enabled => {
+                println!("Successfully enabled backups");
+                tokio::spawn({
+                    let client = client.to_owned();
+                    async move { disable(client).await }
+                });
+            }
             BackupState::Downloading => println!("Downloading the room keys from the backup"),
             BackupState::Disabling => println!("Disabling the backup"),
             BackupState::Disabled => println!("Backup successfully disabled"),

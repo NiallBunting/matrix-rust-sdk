@@ -163,6 +163,8 @@ pub(crate) struct ClientLocks {
     /// [`SecretStore::store_secret`]: crate::encryption::secret_storage::SecretStore::store_secret
     #[cfg(feature = "e2e-encryption")]
     pub(crate) store_secret_lock: Mutex<()>,
+    /// Lock ensuring that only one method at a time might modify our backup.
+    pub(crate) backup_modify_lock: Mutex<()>,
     /// Handler making sure we only have one group session sharing request in
     /// flight per room.
     #[cfg(feature = "e2e-encryption")]

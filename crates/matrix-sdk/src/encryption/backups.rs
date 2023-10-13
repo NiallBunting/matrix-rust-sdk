@@ -85,63 +85,96 @@ impl Backups {
     }
 
     pub async fn create_or_reset(&self) -> Result<(), crate::Error> {
+        let _guard = self.client.locks().backup_modify_lock.lock().await;
+
         self.set_state(BackupState::Creating);
 
-        let decryption_key = BackupDecryptionKey::new().unwrap();
+        let future = async {
+            let decryption_key = BackupDecryptionKey::new().unwrap();
 
-        let backup_key = decryption_key.megolm_v1_public_key();
-        let backup_info = decryption_key.as_room_key_backup_info();
+            let backup_key = decryption_key.megolm_v1_public_key();
 
-        let algorithm = Raw::new(&backup_info)?.cast();
-        let request = create_backup_version::v3::Request::new(algorithm);
-        let response = self.client.send(request, Default::default()).await?;
-        let version = response.version;
+            // TODO: Should we sign this? I guess we need to because other clients might
+            // expect the signature.
+            let backup_info = decryption_key.as_room_key_backup_info();
 
-        let olm_machine = self.client.olm_machine().await;
-        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
+            let algorithm = Raw::new(&backup_info)?.cast();
+            let request = create_backup_version::v3::Request::new(algorithm);
+            let response = self.client.send(request, Default::default()).await?;
+            let version = response.version;
 
-        olm_machine
-            .backup_machine()
-            .save_decryption_key(Some(decryption_key), Some(version.to_owned()))
-            .await?;
+            let olm_machine = self.client.olm_machine().await;
+            let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
 
-        backup_key.set_version(version);
-        self.enable(olm_machine, backup_key).await?;
+            olm_machine
+                .backup_machine()
+                .save_decryption_key(Some(decryption_key), Some(version.to_owned()))
+                .await?;
 
-        Ok(())
+            backup_key.set_version(version);
+            olm_machine.backup_machine().disable_backup().await?;
+
+            self.enable(olm_machine, backup_key).await?;
+            self.maybe_trigger_backup();
+
+            Ok(())
+        };
+
+        let result = future.await;
+
+        if result.is_err() {
+            self.set_state(BackupState::Unknown)
+        }
+
+        result
     }
 
     #[instrument(skip_all, fields(version))]
     pub async fn disable(&self) -> Result<(), crate::Error> {
-        // TODO: Only delete if we're not disabled.
+        let _guard = self.client.locks().backup_modify_lock.lock().await;
 
-        let olm_machine = self.client.olm_machine().await;
-        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
+        // TODO: We don't seem to fire out that we went into the disabling state.
+        self.set_state(BackupState::Disabling);
 
-        let backup_keys = olm_machine.backup_machine().get_backup_keys().await?;
+        let future = async {
+            let olm_machine = self.client.olm_machine().await;
+            let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
 
-        if let Some(version) = backup_keys.backup_version {
-            Span::current().record("version", &version);
+            let backup_keys = olm_machine.backup_machine().get_backup_keys().await?;
 
-            info!("Disabling and deleting backup");
+            if let Some(version) = backup_keys.backup_version {
+                Span::current().record("version", &version);
 
-            // TODO: If we fail at any point we should go back to a different state.
+                info!("Disabling and deleting backup");
 
-            olm_machine.backup_machine().disable_backup().await?;
+                // TODO: If we fail at any point we should go back to a different state.
 
-            info!("Backup successfully disabled");
+                olm_machine.backup_machine().disable_backup().await?;
 
-            let request =
-                ruma::api::client::backup::delete_backup_version::v3::Request::new(version);
+                info!("Backup successfully disabled");
 
-            self.client.send(request, Default::default()).await?;
+                let request =
+                    ruma::api::client::backup::delete_backup_version::v3::Request::new(version);
 
-            info!("Backup successfully disabled and deleted");
-        } else {
-            info!("Backup is not enabled, can't disable it");
+                self.client.send(request, Default::default()).await?;
+                self.set_state(BackupState::Disabled);
+
+                info!("Backup successfully disabled and deleted");
+            } else {
+                info!("Backup is not enabled, can't disable it");
+            }
+            Ok(())
+        };
+
+        let result = future.await;
+
+        // TODO: Is this the right state for this, we could had a storage error or a
+        // network error for the delete call.
+        if result.is_err() {
+            self.set_state(BackupState::Unknown);
         }
 
-        Ok(())
+        result
     }
 
     pub(crate) async fn setup(&self) -> Result<(), crate::Error> {
@@ -158,6 +191,8 @@ impl Backups {
         &self,
         maybe_recovery_key: &str,
     ) -> Result<bool, crate::Error> {
+        let _guard = self.client.locks().backup_modify_lock.lock().await;
+
         self.set_state(BackupState::Enabling);
 
         let olm_machine = self.client.olm_machine().await;
