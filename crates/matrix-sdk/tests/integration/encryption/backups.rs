@@ -90,7 +90,7 @@ async fn create() {
     client
         .encryption()
         .backups()
-        .create_or_reset()
+        .create()
         .await
         .expect("We should be able to create a new backup");
 
@@ -164,7 +164,7 @@ async fn creation_failure() {
     client
         .encryption()
         .backups()
-        .create_or_reset()
+        .create()
         .await
         .expect_err("Creating a new backup should have failed");
 
@@ -219,7 +219,7 @@ async fn disabling() {
     client
         .encryption()
         .backups()
-        .create_or_reset()
+        .create()
         .await
         .expect("We should be able to create a new backup");
 

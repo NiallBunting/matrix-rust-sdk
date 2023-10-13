@@ -84,7 +84,7 @@ impl Backups {
         Ok(())
     }
 
-    pub async fn create_or_reset(&self) -> Result<(), crate::Error> {
+    pub async fn create(&self) -> Result<(), crate::Error> {
         let _guard = self.client.locks().backup_modify_lock.lock().await;
 
         self.set_state(BackupState::Creating);
