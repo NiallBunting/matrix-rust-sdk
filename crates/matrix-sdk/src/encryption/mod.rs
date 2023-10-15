@@ -69,6 +69,7 @@ use crate::{
 pub mod backups;
 mod futures;
 pub mod identities;
+pub mod recovery;
 pub mod secret_storage;
 pub mod verification;
 
@@ -86,6 +87,7 @@ pub use self::futures::PrepareEncryptedFile;
 use self::{
     backups::Backups,
     identities::{DeviceUpdates, IdentityUpdates},
+    recovery::Recovery,
     secret_storage::SecretStore,
 };
 pub use crate::error::RoomKeyImportError;
@@ -999,6 +1001,11 @@ impl Encryption {
     /// Get the backups manager of the client.
     pub fn backups(&self) -> Backups {
         Backups { client: self.client.to_owned() }
+    }
+
+    /// Get the recovery manager of the client.
+    pub fn recovery(&self) -> Recovery {
+        Recovery { client: self.client.to_owned() }
     }
 
     /// Enables the crypto-store cross-process lock.

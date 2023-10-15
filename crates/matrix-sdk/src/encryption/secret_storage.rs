@@ -206,13 +206,48 @@ pub struct SecretStore {
 }
 
 impl SecretStore {
-    pub(super) async fn open(client: Client, key: &str) -> Result<Self> {
+    pub(super) async fn create(client: Client, passphrase: Option<&str>) -> Result<Self> {
         // Prevent multiple simultaneous calls to this method.
         //
         // See the documentation for the lock in the `store_secret` method for more
         // info.
-        let guard = client.locks().open_secret_store_lock.lock().await;
+        let client_copy = client.to_owned();
+        let _guard = client_copy.locks().open_secret_store_lock.lock().await;
 
+        let new_key = if let Some(passphrase) = passphrase {
+            SecretStorageKey::new_from_passphrase(passphrase)
+        } else {
+            SecretStorageKey::new()
+        };
+
+        let content = new_key.event_content().to_owned();
+
+        client.account().set_account_data(content).await?;
+
+        let store = Self { client, key: new_key };
+        store.export_secrets().await?;
+
+        let default_key_content =
+            SecretStorageDefaultKeyEventContent::new(store.key.key_id().to_owned());
+
+        store.client.account().set_account_data(default_key_content).await?;
+
+        Ok(store)
+    }
+
+    /// Export the [`SecretStorageKey`] of this [`SecretStore`] as a
+    /// base58-encoded string as defined in the [spec].
+    ///
+    /// *Note*: This returns a copy of the private key material of the
+    /// [`SecretStorageKey`] as a string. The caller needs to ensure that this
+    /// string is zeroized.
+    ///
+    /// [spec]: https://spec.matrix.org/v1.8/client-server-api/#key-representation
+    pub fn secret_storage_key(&self) -> String {
+        self.key.to_base58()
+    }
+
+    pub(super) async fn open(client: Client, key: &str) -> Result<Self> {
         let maybe_default_key_id = client
             .account()
             .fetch_account_data(GlobalAccountDataEventType::SecretStorageDefaultKey)
@@ -235,26 +270,12 @@ impl SecretStore {
 
                 let key = SecretStorageKey::from_account_data(key, secret_key_content)?;
 
-                drop(guard);
-
                 Ok(Self { client, key })
             } else {
                 Err(SecretStorageError::MissingKeyInfo { key_id: default_key_id.key_id })
             }
         } else {
-            let key = SecretStorageKey::new();
-            let content = key.event_content().to_owned();
-
-            client.account().set_account_data(content).await?;
-
-            let default_key_content =
-                SecretStorageDefaultKeyEventContent::new(key.key_id().to_owned());
-
-            client.account().set_account_data(default_key_content).await?;
-
-            drop(guard);
-
-            Ok(Self { client, key })
+            Self::create(client, None).await
         }
     }
 
@@ -419,6 +440,22 @@ impl SecretStore {
         Ok(export)
     }
 
+    async fn put_cross_signing_keys(&self, export: CrossSigningKeyExport) -> Result<()> {
+        if let Some(master_key) = &export.master_key {
+            self.store_secret(&SecretName::CrossSigningMasterKey, &master_key).await?;
+        }
+
+        if let Some(user_signing_key) = &export.user_signing_key {
+            self.store_secret(&SecretName::CrossSigningUserSigningKey, &user_signing_key).await?;
+        }
+
+        if let Some(self_signing_key) = &export.self_signing_key {
+            self.store_secret(&SecretName::CrossSigningSelfSigningKey, &self_signing_key).await?;
+        }
+
+        Ok(())
+    }
+
     #[allow(dead_code)]
     async fn maybe_enable_backups(&self) -> Result<()> {
         if let Some(mut secret) = self.get_secret(&SecretName::RecoveryKey).await? {
@@ -537,6 +574,26 @@ impl SecretStore {
 
         // TODO: Import the backup key here as well if it exists and enable backups.
         self.maybe_enable_backups().await?;
+
+        Ok(())
+    }
+
+    async fn export_secrets(&self) -> Result<()> {
+        let olm_machine = self.client.olm_machine().await;
+        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine)?;
+
+        if let Some(cross_signing_keys) = olm_machine.export_cross_signing_keys().await? {
+            self.put_cross_signing_keys(cross_signing_keys).await?;
+        }
+
+        let backup_keys = olm_machine.backup_machine().get_backup_keys().await?;
+
+        if let Some(backup_recovery_key) = backup_keys.decryption_key {
+            let mut key = backup_recovery_key.to_base64();
+            self.store_secret(&SecretName::RecoveryKey, &key).await?;
+
+            key.zeroize();
+        }
 
         Ok(())
     }
