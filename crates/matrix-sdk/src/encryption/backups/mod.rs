@@ -44,12 +44,6 @@ pub struct Backups {
     pub(super) client: Client,
 }
 
-// TODO:
-// 1. Automatically create a backup if it doesn't exist
-// 2. Some type of observable telling the application in which state we're in
-// 3. Disable and mark that backups should stay disabled via a custom account
-//    data event.
-
 impl Backups {
     fn set_state(&self, state: BackupState) {
         let mut guard = self.client.inner.backups_state.write();
@@ -116,7 +110,6 @@ impl Backups {
     pub async fn disable(&self) -> Result<(), crate::Error> {
         let _guard = self.client.locks().backup_modify_lock.lock().await;
 
-        // TODO: We don't seem to fire out that we went into the disabling state.
         self.set_state(BackupState::Disabling);
 
         let future = async {
@@ -222,7 +215,6 @@ impl Backups {
                         .unwrap();
                     olm_machine.backup_machine().enable_backup_v1(backup_key).await.unwrap();
 
-                    // TODO: Start backing up keys now.
                     // TODO: Download all keys now, or just leave this task for
                     // when we have a decryption failure?
                     self.set_state(BackupState::Downloading);
