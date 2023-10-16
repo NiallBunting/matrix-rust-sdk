@@ -88,7 +88,7 @@ use self::{
     backups::Backups,
     identities::{DeviceUpdates, IdentityUpdates},
     recovery::Recovery,
-    secret_storage::SecretStore,
+    secret_storage::SecretStorage,
 };
 pub use crate::error::RoomKeyImportError;
 
@@ -898,44 +898,6 @@ impl Encryption {
         task.await.expect("Task join error")
     }
 
-    /// Open the [`SecretStore`] with the given `key`.
-    ///
-    /// The `secret_storage_key` can be a passphrase or a Base58 encoded secret
-    /// storage key.
-    ///
-    /// *Note*: This method will create, and mark, the given
-    /// `secret_storage_key` as the default one if no other default secret
-    /// storage key exists.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use matrix_sdk::Client;
-    /// # use url::Url;
-    /// # async {
-    /// # let homeserver = Url::parse("http://example.com")?;
-    /// # let client = Client::new(homeserver).await?;
-    /// use ruma::events::secret::request::SecretName;
-    ///
-    /// let secret_store = client
-    ///     .encryption()
-    ///     .open_secret_store("It's a secret to everybody")
-    ///     .await?;
-    ///
-    /// let my_secret = "Top secret secret";
-    /// let my_secret_name = SecretName::from("m.treasure");
-    ///
-    /// secret_store.store_secret(&my_secret_name, my_secret);
-    ///
-    /// # anyhow::Ok(()) };
-    /// ```
-    pub async fn open_secret_store(
-        &self,
-        secret_storage_key: &str,
-    ) -> secret_storage::Result<SecretStore> {
-        SecretStore::open(self.client.to_owned(), secret_storage_key).await
-    }
-
     /// Import E2EE keys from the given file path.
     ///
     /// # Arguments
@@ -1001,6 +963,11 @@ impl Encryption {
     /// Get the backups manager of the client.
     pub fn backups(&self) -> Backups {
         Backups { client: self.client.to_owned() }
+    }
+
+    /// Get the secret storage manager of the client.
+    pub fn secret_storage(&self) -> SecretStorage {
+        SecretStorage { client: self.client.to_owned() }
     }
 
     /// Get the recovery manager of the client.

@@ -142,6 +142,136 @@ pub enum DecryptionError {
     Utf8(#[from] FromUtf8Error),
 }
 
+/// A high-level API to manage secret storage.
+///
+/// To get this, use [`Client::secret_storage()`].
+#[derive(Debug)]
+pub struct SecretStorage {
+    pub(super) client: Client,
+}
+
+impl SecretStorage {
+    /// Open the [`SecretStore`] with the given `key`.
+    ///
+    /// The `secret_storage_key` can be a passphrase or a Base58 encoded secret
+    /// storage key.
+    ///
+    /// *Note*: This method will create, and mark, the given
+    /// `secret_storage_key` as the default one if no other default secret
+    /// storage key exists.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use matrix_sdk::Client;
+    /// # use url::Url;
+    /// # async {
+    /// # let homeserver = Url::parse("http://example.com")?;
+    /// # let client = Client::new(homeserver).await?;
+    /// use ruma::events::secret::request::SecretName;
+    ///
+    /// let secret_store = client
+    ///     .encryption()
+    ///     .open_secret_store("It's a secret to everybody")
+    ///     .await?;
+    ///
+    /// let my_secret = "Top secret secret";
+    /// let my_secret_name = SecretName::from("m.treasure");
+    ///
+    /// secret_store.store_secret(&my_secret_name, my_secret);
+    ///
+    /// # anyhow::Ok(()) };
+    /// ```
+    pub async fn open_secret_store(&self, secret_storage_key: &str) -> Result<SecretStore> {
+        let maybe_default_key_id = self
+            .client
+            .account()
+            .fetch_account_data(GlobalAccountDataEventType::SecretStorageDefaultKey)
+            .await?;
+
+        if let Some(default_key_id) = maybe_default_key_id {
+            let default_key_id =
+                default_key_id.deserialize_as::<SecretStorageDefaultKeyEventContent>()?;
+
+            let event_type =
+                GlobalAccountDataEventType::SecretStorageKey(default_key_id.key_id.to_owned());
+            let secret_key =
+                self.client.account().fetch_account_data(event_type.to_owned()).await?;
+
+            if let Some(secret_key_content) = secret_key {
+                let event_type = event_type.to_string();
+                let secret_key_content = to_raw_value(&secret_key_content)?;
+
+                let secret_key_content =
+                    SecretStorageKeyEventContent::from_parts(&event_type, &secret_key_content)?;
+
+                let key =
+                    SecretStorageKey::from_account_data(secret_storage_key, secret_key_content)?;
+
+                Ok(SecretStore { client: self.client.to_owned(), key })
+            } else {
+                Err(SecretStorageError::MissingKeyInfo { key_id: default_key_id.key_id })
+            }
+        } else {
+            self.create_secret_store(None).await
+        }
+    }
+
+    pub async fn create_secret_store(&self, passphrase: Option<&str>) -> Result<SecretStore> {
+        // Prevent multiple simultaneous calls to this method.
+        //
+        // See the documentation for the lock in the `store_secret` method for more
+        // info.
+        let client_copy = self.client.to_owned();
+        let _guard = client_copy.locks().open_secret_store_lock.lock().await;
+
+        let new_key = if let Some(passphrase) = passphrase {
+            SecretStorageKey::new_from_passphrase(passphrase)
+        } else {
+            SecretStorageKey::new()
+        };
+
+        let content = new_key.event_content().to_owned();
+
+        self.client.account().set_account_data(content).await?;
+
+        let store = SecretStore { client: self.client.to_owned(), key: new_key };
+        store.export_secrets().await?;
+
+        let default_key_content =
+            SecretStorageDefaultKeyEventContent::new(store.key.key_id().to_owned());
+
+        store.client.account().set_account_data(default_key_content).await?;
+
+        Ok(store)
+    }
+
+    /// Is secret storage set up for this user?
+    pub async fn is_enabled(&self) -> Result<bool> {
+        // Since account data events cannot be disabled we can be sure that if the event
+        // is in the store, secret storage was at some point enabled.
+        //
+        // Otherwise, if we don't find the event in the store, double check if the event
+        // exists on the server, in case the user never synced with the server.
+        if self
+            .client
+            .account()
+            .account_data::<SecretStorageDefaultKeyEventContent>()
+            .await?
+            .is_none()
+        {
+            Ok(self
+                .client
+                .account()
+                .fetch_account_data(GlobalAccountDataEventType::SecretStorageDefaultKey)
+                .await?
+                .is_some())
+        } else {
+            Ok(true)
+        }
+    }
+}
+
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// Secure key/value storage for Matrix users.
 ///
@@ -206,35 +336,6 @@ pub struct SecretStore {
 }
 
 impl SecretStore {
-    pub(super) async fn create(client: Client, passphrase: Option<&str>) -> Result<Self> {
-        // Prevent multiple simultaneous calls to this method.
-        //
-        // See the documentation for the lock in the `store_secret` method for more
-        // info.
-        let client_copy = client.to_owned();
-        let _guard = client_copy.locks().open_secret_store_lock.lock().await;
-
-        let new_key = if let Some(passphrase) = passphrase {
-            SecretStorageKey::new_from_passphrase(passphrase)
-        } else {
-            SecretStorageKey::new()
-        };
-
-        let content = new_key.event_content().to_owned();
-
-        client.account().set_account_data(content).await?;
-
-        let store = Self { client, key: new_key };
-        store.export_secrets().await?;
-
-        let default_key_content =
-            SecretStorageDefaultKeyEventContent::new(store.key.key_id().to_owned());
-
-        store.client.account().set_account_data(default_key_content).await?;
-
-        Ok(store)
-    }
-
     /// Export the [`SecretStorageKey`] of this [`SecretStore`] as a
     /// base58-encoded string as defined in the [spec].
     ///
@@ -245,38 +346,6 @@ impl SecretStore {
     /// [spec]: https://spec.matrix.org/v1.8/client-server-api/#key-representation
     pub fn secret_storage_key(&self) -> String {
         self.key.to_base58()
-    }
-
-    pub(super) async fn open(client: Client, key: &str) -> Result<Self> {
-        let maybe_default_key_id = client
-            .account()
-            .fetch_account_data(GlobalAccountDataEventType::SecretStorageDefaultKey)
-            .await?;
-
-        if let Some(default_key_id) = maybe_default_key_id {
-            let default_key_id =
-                default_key_id.deserialize_as::<SecretStorageDefaultKeyEventContent>()?;
-
-            let event_type =
-                GlobalAccountDataEventType::SecretStorageKey(default_key_id.key_id.to_owned());
-            let secret_key = client.account().fetch_account_data(event_type.to_owned()).await?;
-
-            if let Some(secret_key_content) = secret_key {
-                let event_type = event_type.to_string();
-                let secret_key_content = to_raw_value(&secret_key_content)?;
-
-                let secret_key_content =
-                    SecretStorageKeyEventContent::from_parts(&event_type, &secret_key_content)?;
-
-                let key = SecretStorageKey::from_account_data(key, secret_key_content)?;
-
-                Ok(Self { client, key })
-            } else {
-                Err(SecretStorageError::MissingKeyInfo { key_id: default_key_id.key_id })
-            }
-        } else {
-            Self::create(client, None).await
-        }
     }
 
     /// Retrieve a secret from the homeserver's account data
@@ -456,7 +525,6 @@ impl SecretStore {
         Ok(())
     }
 
-    #[allow(dead_code)]
     async fn maybe_enable_backups(&self) -> Result<()> {
         if let Some(mut secret) = self.get_secret(&SecretName::RecoveryKey).await? {
             if let Err(e) = self.client.encryption().backups().maybe_enable_backups(&secret).await {

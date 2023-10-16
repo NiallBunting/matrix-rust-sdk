@@ -164,6 +164,8 @@ async fn reset_key(client: &Client, passphrase: Option<&str>) -> Result<()> {
 }
 
 async fn run_command(client: &Client, command: Command) -> Result<()> {
+    // TODO: Convert this into a proper REPL, perhaps even a status at the top would
+    // be nice.
     match command {
         Command::Disable => disable(client).await,
         Command::Enable => enable(client).await,

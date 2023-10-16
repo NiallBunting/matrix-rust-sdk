@@ -58,6 +58,7 @@ impl Default for BackupState {
     }
 }
 
+#[derive(Debug)]
 pub struct UploadBackups<'a> {
     backups: &'a Backups,
     olm_machine: OlmMachine,
