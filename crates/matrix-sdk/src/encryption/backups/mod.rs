@@ -14,16 +14,13 @@
 
 #![allow(missing_docs)]
 
-use std::{collections::BTreeMap, future::IntoFuture, pin::Pin, time::Duration};
+use std::collections::BTreeMap;
 
-use eyeball::{ObservableWriteGuard, SharedObservable};
-use futures_core::{Future, Stream};
+use eyeball::ObservableWriteGuard;
+use futures_core::Stream;
 use matrix_sdk_base::crypto::{
-    backups::MegolmV1BackupKey,
-    olm::BackedUpRoomKey,
-    store::{BackupDecryptionKey, RoomKeyCounts},
-    types::RoomKeyBackupInfo,
-    GossippedSecret, OlmMachine,
+    backups::MegolmV1BackupKey, olm::BackedUpRoomKey, store::BackupDecryptionKey,
+    types::RoomKeyBackupInfo, GossippedSecret, OlmMachine,
 };
 use ruma::{
     api::client::backup::{
@@ -34,89 +31,13 @@ use ruma::{
     serde::Raw,
     OwnedRoomId,
 };
-use tracing::{info, instrument, trace, warn, Span};
+use tracing::{info, instrument, warn, Span};
+
+mod futures;
+
+pub use futures::{BackupState, UploadBackups};
 
 use crate::Client;
-
-// TODO: Do we want to attach some data to these states? I.e. the backup
-// version?
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BackupState {
-    Unknown,
-    Creating,
-    Enabling,
-    Resuming,
-    Enabled,
-    Downloading,
-    Disabling,
-    Disabled,
-}
-
-impl Default for BackupState {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
-
-#[derive(Debug)]
-pub struct UploadBackups<'a> {
-    backups: &'a Backups,
-    olm_machine: OlmMachine,
-    timeout: Option<Duration>,
-    progress: SharedObservable<RoomKeyCounts>,
-}
-
-impl<'a> UploadBackups<'a> {
-    pub fn subscribe_to_progress(&self) -> impl Stream<Item = RoomKeyCounts> {
-        self.progress.subscribe_reset()
-    }
-
-    pub fn with_delay(mut self, delay: Duration) -> Self {
-        self.timeout = Some(delay);
-
-        self
-    }
-}
-
-impl<'a> IntoFuture for UploadBackups<'a> {
-    type Output = crate::Result<()>;
-    #[cfg(target_arch = "wasm32")]
-    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + 'a>>;
-    #[cfg(not(target_arch = "wasm32"))]
-    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
-
-    fn into_future(self) -> Self::IntoFuture {
-        Box::pin(async move {
-            let Self { backups, olm_machine, timeout, progress } = self;
-
-            while let Some((request_id, request)) = olm_machine.backup_machine().backup().await? {
-                trace!(%request_id, "Uploading some room keys");
-
-                let request = ruma::api::client::backup::add_backup_keys::v3::Request::new(
-                    request.version,
-                    request.rooms,
-                );
-
-                let response = backups.client.send(request, Default::default()).await?;
-
-                olm_machine.mark_request_as_sent(&request_id, &response).await?;
-
-                if progress.subscriber_count() != 0 {
-                    let new_counts = olm_machine.backup_machine().room_key_counts().await?;
-
-                    progress.set(new_counts);
-                }
-
-                #[cfg(not(target_arch = "wasm32"))]
-                if let Some(timeout) = timeout {
-                    tokio::time::sleep(timeout).await;
-                }
-            }
-
-            Ok(())
-        })
-    }
-}
 
 #[derive(Debug)]
 pub struct Backups {

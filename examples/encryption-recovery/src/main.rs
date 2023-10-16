@@ -114,7 +114,7 @@ async fn listen_for_backup_state_changes(client: Client) {
 
 async fn logout(client: &Client) -> Result<()> {
     let recovery = client.encryption().recovery();
-    let enable_backup = recovery.enable().wait_for_backups_upload().create_new_backup();
+    let enable_backup = recovery.enable().wait_for_backups_to_upload().create_new_backup();
 
     let progress = enable_backup.subscribe_to_progress();
 

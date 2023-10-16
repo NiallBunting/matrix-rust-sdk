@@ -19,8 +19,9 @@
 //!
 //! Dear spec connosieuers, recovery here is not the same as the [`Recovery
 //! key`] mentioned in the spec. The recovery key from the spec is solely about
-//! backups, while the term recovery in this file includes both the backup
-//! recovery key and the secret storage key.
+//! backups, while the term recovery in this file includes both the backups
+//! and the secret storage mechanism. The recovery key mentioned in this file is
+//! the secret storage key.
 //!
 //! [`Recovery key`]: https://spec.matrix.org/v1.8/client-server-api/#recovery-key
 

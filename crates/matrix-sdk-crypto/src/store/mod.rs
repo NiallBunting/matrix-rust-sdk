@@ -652,7 +652,7 @@ impl DeviceChanges {
 }
 
 /// Struct holding info about how many room keys the store has.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Zeroize)]
 pub struct RoomKeyCounts {
     /// The total number of room keys the store has.
     pub total: usize,

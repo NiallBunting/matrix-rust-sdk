@@ -18,17 +18,18 @@ use eyeball::SharedObservable;
 use futures_core::{Future, Stream};
 use futures_util::{pin_mut, StreamExt};
 use matrix_sdk_base::crypto::store::RoomKeyCounts;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::Recovery;
 use crate::{encryption::secret_storage::SecretStore, Result};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub enum EnableProgress {
     CreatingBackup,
     CreatingRecoveryKey,
     MarkingAsEnabled,
     BackingUp(RoomKeyCounts),
-    Done,
+    Done { recovery_key: String },
 }
 
 impl Default for EnableProgress {
@@ -56,7 +57,7 @@ impl<'a> Enable<'a> {
         self
     }
 
-    pub fn wait_for_backups_upload(mut self) -> Self {
+    pub fn wait_for_backups_to_upload(mut self) -> Self {
         self.wait_for_backups_upload = true;
 
         self
@@ -120,8 +121,9 @@ impl<'a> IntoFuture for Enable<'a> {
                 recovery.client.encryption().backups().maybe_trigger_backup();
             }
 
-            // TODO: Do we want to put the recovery key into the observable?
-            progress.set(EnableProgress::Done);
+            let key = store.secret_storage_key();
+
+            progress.set(EnableProgress::Done { recovery_key: key });
 
             Ok(store.secret_storage_key())
         })
