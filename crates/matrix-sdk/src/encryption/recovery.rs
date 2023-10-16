@@ -24,6 +24,12 @@
 //!
 //! [`Recovery key`]: https://spec.matrix.org/v1.8/client-server-api/#recovery-key
 
+use std::{future::IntoFuture, pin::Pin};
+
+use eyeball::SharedObservable;
+use futures_core::{Future, Stream};
+use futures_util::{pin_mut, StreamExt};
+use matrix_sdk_base::crypto::store::RoomKeyCounts;
 use ruma::{
     events::{EventContent, GlobalAccountDataEventType},
     exports::ruma_macros::EventContent,
@@ -40,7 +46,7 @@ struct RecoveryDisabledEventContent {
 
 impl RecoveryDisabledEventContent {
     fn event_type() -> GlobalAccountDataEventType {
-        // This is dumb, there's got to be a better way to do this.
+        // This is dumb, there's got to be a better way to get to the event type?
         Self { disabled: false }.event_type()
     }
 }
@@ -50,29 +56,125 @@ pub struct Recovery {
     pub(super) client: Client,
 }
 
-// TODO: Add an observable for the current state of this, perhaps we don't need
-// the one in `backups.rs` then.
-// We likely want multiple observables, something for the global state of things
-// which might change without direct calls to any of these methods since we can
-// receive secrets over the `m.secret.send` mechanism after an interactive
-// verification. On the other hand, some of the methods here might have their
-// own observable to track the progress of the method.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnableProgress {
+    CreatingBackup,
+    CreatingRecoveryKey,
+    MarkingAsEnabled,
+    BackingUp(RoomKeyCounts),
+    Done,
+}
+
+impl Default for EnableProgress {
+    fn default() -> Self {
+        Self::CreatingBackup
+    }
+}
+
+pub struct Enable<'a> {
+    recovery: &'a Recovery,
+    progress: SharedObservable<EnableProgress>,
+    wait_for_backups_upload: bool,
+    create_new_backup: bool,
+    passphrase: Option<&'a str>,
+}
+
+impl<'a> Enable<'a> {
+    pub fn subscribe_to_progress(&self) -> impl Stream<Item = EnableProgress> {
+        self.progress.subscribe_reset()
+    }
+
+    pub fn create_new_backup(mut self) -> Self {
+        self.create_new_backup = true;
+
+        self
+    }
+
+    pub fn wait_for_backups_upload(mut self) -> Self {
+        self.wait_for_backups_upload = true;
+
+        self
+    }
+
+    pub fn with_passphrase(mut self, passphrase: &'a str) -> Self {
+        self.passphrase = Some(passphrase);
+
+        self
+    }
+}
+
+impl<'a> IntoFuture for Enable<'a> {
+    type Output = Result<String>;
+    #[cfg(target_arch = "wasm32")]
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + 'a>>;
+    #[cfg(not(target_arch = "wasm32"))]
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let Self { recovery, progress, wait_for_backups_upload, create_new_backup, passphrase } =
+                self;
+
+            if create_new_backup {
+                progress.set(EnableProgress::CreatingBackup);
+                recovery.client.encryption().backups().create().await?;
+            }
+
+            progress.set(EnableProgress::CreatingRecoveryKey);
+            let store: SecretStore =
+                SecretStore::create(self.recovery.client.to_owned(), passphrase).await.unwrap();
+
+            progress.set(EnableProgress::MarkingAsEnabled);
+            recovery.mark_as_globally_enabled().await?;
+
+            if wait_for_backups_upload {
+                let backups = recovery.client.encryption().backups();
+                let upload_future = backups.backup_room_keys().await;
+                let upload_progress = upload_future.subscribe_to_progress();
+
+                let progress_task = matrix_sdk_common::executor::spawn({
+                    let progress = progress.clone();
+                    async move {
+                        pin_mut!(upload_progress);
+
+                        while let Some(update) = upload_progress.next().await {
+                            progress.set(EnableProgress::BackingUp(update));
+                        }
+                    }
+                });
+
+                upload_future.await?;
+                progress_task.abort();
+            } else {
+                recovery.client.encryption().backups().maybe_trigger_backup();
+            }
+
+            // TODO: Do we want to put the recovery key into the observable?
+            progress.set(EnableProgress::Done);
+
+            Ok(store.secret_storage_key())
+        })
+    }
+}
 
 // TODO: We need to support the following flows:
 // 1. Set up recovery - this creates a secret storage key and presumably uploads
 //    all the known secrets to secret storage
 // 2. Change recovery key - this does the same as the above but overwrites any
-//    existing secret storage key
+//    existing secret storage key, it does not create a new backup or rotate the
+//    cross-signing keys.
 // 3. Turn off backup - This is one of the most confusing options, this option
 //    should turn off the backup, delete the backup version, and somehow delete
 //    4S (I don't think that this is possible the default_key event can't be
 //    deleted nor can we unset the key ID in the event as it's a required
 //    field).
 // 3. Turn on backup - This should create a backup if it doesn't exist, but
-//    should it upload the backup recovery key to secret storage?
+//    should it upload the backup recovery key to secret storage? Pretty sure it
+//    should.
 // 4. Fix recovery issues - This is basically restoring your cross-signing keys
-//    and backup key from secret storage after the user has entered a
-//    passphrase. Something we explicitly said we're not going to do.
+//    and backup key from secret storage after the user has entered a secret
+//    storage key/passphrase. Something we explicitly said we're not going to
+//    do.
 // 5. Let users set up recovery in a quick manner before logging out if they are
 //    on their last device.
 // 6. Automatically bootstrap cross-signing and backups if they are logging in
@@ -86,26 +188,16 @@ pub struct Recovery {
 
 impl Recovery {
     /// Enable recovery if it isn't already enabled.
-    pub async fn enable(&self) -> Result<()> {
-        // I am so confused with these disable/enable backups operations compared to the
-        // disable/enable recovery. I'm pretty sure that this should actually just
-        // enable recovery as a whole and present the recovery key to the user,
-        // i.e. this method should return the base58 encoded secret storage key.
-        self.client.encryption().backups().create().await?;
-        self.mark_as_globally_enabled().await?;
-
-        Ok(())
-    }
-
-    /// Enable recovery if it isn't already enabled and backup all room keys.
-    pub async fn enable_and_backup_room_keys(&self) -> Result<()> {
-        // We should probably mimic what the `SendAttachment` type does so we present
-        // the caller with an observable progress thingy.
-        //
-        // We can get the room key counts using
-        // `OlmMachine::backup_machine()::room_key_counts() and put that into an
-        // observable, updating it after every successful upload request.
-        todo!()
+    pub fn enable(&self) -> Enable<'_> {
+        // TODO: How to only allow this to be called if you are the only/last device
+        // this user has?
+        Enable {
+            recovery: self,
+            progress: Default::default(),
+            wait_for_backups_upload: false,
+            create_new_backup: false,
+            passphrase: Default::default(),
+        }
     }
 
     /// Disable recovery completely.
@@ -131,7 +223,7 @@ impl Recovery {
     ///
     /// This will rotate the secret storage key and re-upload all the secrets to
     /// the [`SecretStore`].
-    pub async fn reset_key(&self) -> Result<Option<String>> {
+    pub async fn reset_key(&self, passphrase: Option<&str>) -> Result<Option<String>> {
         // Only do this if we have all the secrets at hand:
         //
         // 1. Cross-signing keys
@@ -140,18 +232,20 @@ impl Recovery {
         // TODO: The `true` here should be replaced with a call to a
         // `do_we_have_all_the_secrets_locally()` method.
         if true {
-            let store: SecretStore =
-                SecretStore::create(self.client.to_owned(), None).await.unwrap();
+            let mut enable = self.enable();
+            enable.passphrase = passphrase;
 
-            Ok(Some(store.secret_storage_key()))
+            let recovery_key = enable.await?;
+
+            Ok(Some(recovery_key))
         } else {
             // TODO: The else case should open the currently active secret store, the user
-            // needs to enter the passphrase, wait a minute!?!? Another case
-            // where we do ENTER the existing passphrase??! The product requirement doc
+            // needs to enter the recovery key, wait a minute!?!? Another case
+            // where we do ENTER the existing recovery key??! The product requirement doc
             // tells us this:
             // > Requires the device to be trusted. Otherwise an existing recovery key is required.
             //
-            // What happens if you don't know the passphrase and are not a trusted device
+            // What happens if you don't know the recovery key and are not a trusted device
             // and are the last device?!?
             Ok(None)
         }

@@ -29,12 +29,6 @@ struct Cli {
     /// Enable verbose logging output.
     #[clap(short, long, action)]
     verbose: bool,
-
-    /// The recovery key, AKA the secret storage key, this key will be used to
-    /// open the secret-store. Not to be confused with the Recovery key from the
-    /// spec.
-    #[clap(long, action)]
-    recovery_key: String,
 }
 
 #[derive(Parser, Debug)]
@@ -47,10 +41,22 @@ enum Command {
     Enable,
     /// Change the recovery key, we generate a new one and present the base58
     /// string to the user.
-    ChangeRecoveryKey,
+    ChangeRecoveryKey {
+        /// The passphrase, which can be used to recover, in addition to the
+        /// recovery key.
+        #[clap(long, action)]
+        passphrase: Option<String>,
+    },
     /// Logout, if recovery isn't enabled, ask the user if they want to do so
     /// now.
     Logout,
+    Recover {
+        /// The recovery key, AKA the secret storage key, this key will be used
+        /// to open the secret-store. Not to be confused with the
+        /// Recovery key from the spec.
+        #[clap(long, action)]
+        recovery_key: String,
+    },
 }
 
 async fn recover(client: &Client, recovery_key: &str) -> Result<()> {
@@ -106,23 +112,73 @@ async fn listen_for_backup_state_changes(client: Client) {
     }
 }
 
+async fn logout(client: &Client) -> Result<()> {
+    let recovery = client.encryption().recovery();
+    let enable_backup = recovery.enable().wait_for_backups_upload().create_new_backup();
+
+    let progress = enable_backup.subscribe_to_progress();
+
+    let task = tokio::spawn(async move {
+        pin_mut!(progress);
+
+        while let Some(update) = progress.next().await {
+            println!("Hello world {update:?}");
+        }
+    });
+
+    let recovery_key = enable_backup.await?;
+    println!("Successfully created a recovery key: `{recovery_key}`.");
+
+    task.abort();
+
+    Ok(())
+}
+
+async fn enable(client: &Client) -> Result<()> {
+    let recovery = client.encryption().recovery();
+    let enable_backup = recovery.enable();
+
+    let recovery_key = enable_backup.await?;
+    println!("Successfully enabled recovery, recovery key: `{recovery_key}`.");
+
+    Ok(())
+}
+
+async fn disable(client: &Client) -> Result<()> {
+    client.encryption().recovery().disable().await?;
+
+    println!("Successfully disable recovery.");
+
+    Ok(())
+}
+
+async fn reset_key(client: &Client, passphrase: Option<&str>) -> Result<()> {
+    if let Some(mut recovery_key) = client.encryption().recovery().reset_key(passphrase).await? {
+        println!("Successfully changed the recovery key, new key: `{recovery_key}`.");
+        recovery_key.zeroize();
+    } else {
+        println!("Could not change the recovery key as we don't have access to all the secrets.")
+    }
+
+    Ok(())
+}
+
 async fn run_command(client: &Client, command: Command) -> Result<()> {
     match command {
-        Command::Disable => Ok(client.encryption().recovery().disable().await?),
-        Command::Enable => Ok(client.encryption().recovery().enable().await?),
-        Command::ChangeRecoveryKey => {
-            if let Some(mut recovery_key) = client.encryption().recovery().reset_key().await? {
-                println!("Successfully changed the recovery key, new key: `{recovery_key}`.");
-                recovery_key.zeroize();
-            } else {
-                println!(
-                    "Could not change the recovery key as we don't have access to all the secrets."
-                )
-            }
-
-            Ok(())
+        Command::Disable => disable(client).await,
+        Command::Enable => enable(client).await,
+        Command::ChangeRecoveryKey { mut passphrase } => {
+            let ret = reset_key(client, passphrase.as_deref()).await;
+            passphrase.zeroize();
+            ret
         }
-        Command::Logout => todo!(),
+        Command::Recover { mut recovery_key } => {
+            let ret = recover(client, &recovery_key).await;
+            recovery_key.zeroize();
+
+            ret
+        }
+        Command::Logout => logout(client).await,
     }
 }
 
@@ -168,8 +224,6 @@ async fn main() -> Result<()> {
         let client = client.to_owned();
         async move { listen_for_backup_state_changes(client.to_owned()).await }
     });
-
-    recover(&client, &cli.recovery_key).await?;
 
     let _sync_task = tokio::spawn({
         let client = client.to_owned();

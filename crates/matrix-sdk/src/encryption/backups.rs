@@ -14,13 +14,16 @@
 
 #![allow(missing_docs)]
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, future::IntoFuture, pin::Pin, time::Duration};
 
-use eyeball::ObservableWriteGuard;
-use futures_core::Stream;
+use eyeball::{ObservableWriteGuard, SharedObservable};
+use futures_core::{Future, Stream};
 use matrix_sdk_base::crypto::{
-    backups::MegolmV1BackupKey, olm::BackedUpRoomKey, store::BackupDecryptionKey,
-    types::RoomKeyBackupInfo, GossippedSecret, OlmMachine,
+    backups::MegolmV1BackupKey,
+    olm::BackedUpRoomKey,
+    store::{BackupDecryptionKey, RoomKeyCounts},
+    types::RoomKeyBackupInfo,
+    GossippedSecret, OlmMachine,
 };
 use ruma::{
     api::client::backup::{
@@ -52,6 +55,65 @@ pub enum BackupState {
 impl Default for BackupState {
     fn default() -> Self {
         Self::Unknown
+    }
+}
+
+pub struct UploadBackups<'a> {
+    backups: &'a Backups,
+    olm_machine: OlmMachine,
+    timeout: Option<Duration>,
+    progress: SharedObservable<RoomKeyCounts>,
+}
+
+impl<'a> UploadBackups<'a> {
+    pub fn subscribe_to_progress(&self) -> impl Stream<Item = RoomKeyCounts> {
+        self.progress.subscribe_reset()
+    }
+
+    pub fn with_delay(mut self, delay: Duration) -> Self {
+        self.timeout = Some(delay);
+
+        self
+    }
+}
+
+impl<'a> IntoFuture for UploadBackups<'a> {
+    type Output = crate::Result<()>;
+    #[cfg(target_arch = "wasm32")]
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + 'a>>;
+    #[cfg(not(target_arch = "wasm32"))]
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let Self { backups, olm_machine, timeout, progress } = self;
+
+            while let Some((request_id, request)) = olm_machine.backup_machine().backup().await? {
+                trace!(%request_id, "Uploading some room keys");
+
+                let request = ruma::api::client::backup::add_backup_keys::v3::Request::new(
+                    request.version,
+                    request.rooms,
+                );
+
+                let response = backups.client.send(request, Default::default()).await?;
+
+                olm_machine.mark_request_as_sent(&request_id, &response).await?;
+
+                if progress.subscriber_count() != 0 {
+                    let new_counts = olm_machine.backup_machine().room_key_counts().await?;
+
+                    progress.set(new_counts);
+                }
+
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(timeout) = timeout {
+                    tokio::time::sleep(timeout).await;
+                }
+            }
+
+            Ok(())
+        })
     }
 }
 
@@ -115,7 +177,6 @@ impl Backups {
             olm_machine.backup_machine().disable_backup().await?;
 
             self.enable(olm_machine, backup_key).await?;
-            self.maybe_trigger_backup();
 
             Ok(())
         };
@@ -180,6 +241,8 @@ impl Backups {
     pub(crate) async fn setup(&self) -> Result<(), crate::Error> {
         info!("Setting up secret listeners and trying to resume backups");
 
+        // TODO: We have a nice [`OlmMachine::store()::secrets_strea()`] which we could
+        // use instead of a event handler.
         self.client.add_event_handler(Self::secret_send_event_handler);
         self.maybe_resume_backups().await?;
 
@@ -386,27 +449,14 @@ impl Backups {
         }
     }
 
-    pub(crate) async fn backup_room_keys(&self) -> Result<(), crate::Error> {
+    pub(crate) async fn backup_room_keys(&self) -> UploadBackups<'_> {
         // TODO: Lock this, so we're uploading only one per client.
 
         let olm_machine = self.client.olm_machine().await;
-        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
+        let olm_machine =
+            olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap().to_owned();
 
-        while let Some((request_id, request)) = olm_machine.backup_machine().backup().await? {
-            trace!(%request_id, "Uploading some room keys");
-
-            let request = ruma::api::client::backup::add_backup_keys::v3::Request::new(
-                request.version,
-                request.rooms,
-            );
-
-            let response = self.client.send(request, Default::default()).await?;
-
-            olm_machine.mark_request_as_sent(&request_id, &response).await?;
-            // TODO: Should we sleep for a bit after every loop iteration?
-        }
-
-        Ok(())
+        UploadBackups { backups: self, olm_machine, timeout: None, progress: Default::default() }
     }
 
     async fn handle_downloaded_room_keys(

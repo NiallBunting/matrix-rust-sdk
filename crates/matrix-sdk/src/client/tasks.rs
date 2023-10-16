@@ -72,8 +72,11 @@ impl BackupUploadingTask {
 
             if let Some(client) = client.upgrade() {
                 let client = Client { inner: client };
+                let backups = client.encryption().backups();
 
-                if let Err(e) = client.encryption().backups().backup_room_keys().await {
+                let upload_future = backups.backup_room_keys().await;
+
+                if let Err(e) = upload_future.await {
                     warn!("Error backing up room keys {e:?}");
                 }
             } else {
