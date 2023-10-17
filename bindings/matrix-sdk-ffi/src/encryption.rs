@@ -65,6 +65,10 @@ impl Encryption {
         stream_task.into()
     }
 
+    pub async fn is_last_device(&self) -> Result<bool, ClientError> {
+        Ok(self.inner.recovery().are_we_the_last_man_standing().await?)
+    }
+
     pub fn backup_state(&self) -> BackupState {
         self.inner.backups().state().into()
     }
