@@ -27,7 +27,6 @@ use crate::{encryption::secret_storage::SecretStore, Result};
 pub enum EnableProgress {
     CreatingBackup,
     CreatingRecoveryKey,
-    MarkingAsEnabled,
     BackingUp(RoomKeyCounts),
     Done { recovery_key: String },
 }
@@ -42,19 +41,21 @@ pub struct Enable<'a> {
     pub(super) recovery: &'a Recovery,
     pub(super) progress: SharedObservable<EnableProgress>,
     pub(super) wait_for_backups_upload: bool,
-    pub(super) create_new_backup: bool,
     pub(super) passphrase: Option<&'a str>,
 }
 
 impl<'a> Enable<'a> {
-    pub fn subscribe_to_progress(&self) -> impl Stream<Item = EnableProgress> {
-        self.progress.subscribe_reset()
+    pub(super) fn new(recovery: &'a Recovery) -> Self {
+        Self {
+            recovery,
+            progress: Default::default(),
+            wait_for_backups_upload: false,
+            passphrase: None,
+        }
     }
 
-    pub fn create_new_backup(mut self) -> Self {
-        self.create_new_backup = true;
-
-        self
+    pub fn subscribe_to_progress(&self) -> impl Stream<Item = EnableProgress> {
+        self.progress.subscribe_reset()
     }
 
     pub fn wait_for_backups_to_upload(mut self) -> Self {
@@ -79,11 +80,11 @@ impl<'a> IntoFuture for Enable<'a> {
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            let Self { recovery, progress, wait_for_backups_upload, create_new_backup, passphrase } =
-                self;
+            let Self { recovery, progress, wait_for_backups_upload, passphrase } = self;
 
-            if create_new_backup {
+            if !recovery.client.encryption().backups().is_enabled().await {
                 progress.set(EnableProgress::CreatingBackup);
+                recovery.mark_backup_as_enabled().await?;
                 recovery.client.encryption().backups().create().await?;
             }
 
@@ -96,8 +97,7 @@ impl<'a> IntoFuture for Enable<'a> {
                 .await
                 .unwrap();
 
-            progress.set(EnableProgress::MarkingAsEnabled);
-            recovery.mark_as_globally_enabled().await?;
+            recovery.mark_secret_storage_as_enabled().await?;
 
             if wait_for_backups_upload {
                 let backups = recovery.client.encryption().backups();
@@ -126,6 +126,57 @@ impl<'a> IntoFuture for Enable<'a> {
             progress.set(EnableProgress::Done { recovery_key: key });
 
             Ok(store.secret_storage_key())
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnableBackupProgress {
+    CreatingBackup,
+    BackingUp(RoomKeyCounts),
+    Done,
+}
+
+impl Default for EnableBackupProgress {
+    fn default() -> Self {
+        Self::CreatingBackup
+    }
+}
+
+#[derive(Debug)]
+pub struct EnableBackup<'a> {
+    pub(super) recovery: &'a Recovery,
+    pub(super) progress: SharedObservable<EnableBackupProgress>,
+}
+
+impl<'a> EnableBackup<'a> {
+    pub(super) fn new(recovery: &'a Recovery) -> Self {
+        Self { recovery, progress: Default::default() }
+    }
+    pub fn subscribe_to_progress(&self) -> impl Stream<Item = EnableBackupProgress> {
+        self.progress.subscribe_reset()
+    }
+}
+
+impl<'a> IntoFuture for EnableBackup<'a> {
+    type Output = Result<()>;
+    #[cfg(target_arch = "wasm32")]
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + 'a>>;
+    #[cfg(not(target_arch = "wasm32"))]
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let Self { recovery, progress } = self;
+
+            recovery.client.encryption().backups().create().await?;
+            recovery.mark_backup_as_enabled().await?;
+
+            recovery.client.encryption().backups().maybe_trigger_backup();
+
+            progress.set(EnableBackupProgress::Done);
+
+            Ok(())
         })
     }
 }

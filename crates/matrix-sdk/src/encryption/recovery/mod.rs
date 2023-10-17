@@ -26,6 +26,7 @@
 //! [`Recovery key`]: https://spec.matrix.org/v1.8/client-server-api/#recovery-key
 
 use ruma::{
+    api::client::uiaa::AuthData,
     events::{EventContent, GlobalAccountDataEventType},
     exports::ruma_macros::EventContent,
 };
@@ -37,13 +38,21 @@ mod futures;
 
 pub use futures::{Enable, EnableProgress};
 
+use self::futures::EnableBackup;
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, EventContent)]
-#[ruma_event(type = "m.org.matrix.custom.recovery_disabled", kind = GlobalAccountData)]
-struct RecoveryDisabledEventContent {
+#[ruma_event(type = "m.org.matrix.custom.secret_storage_disabled", kind = GlobalAccountData)]
+struct SecretStorageDisabledContent {
     disabled: bool,
 }
 
-impl RecoveryDisabledEventContent {
+#[derive(Clone, Debug, Default, Deserialize, Serialize, EventContent)]
+#[ruma_event(type = "m.org.matrix.custom.backup_disabled", kind = GlobalAccountData)]
+struct BackupDisabledContent {
+    disabled: bool,
+}
+
+impl BackupDisabledContent {
     fn event_type() -> GlobalAccountDataEventType {
         // This is dumb, there's got to be a better way to get to the event type?
         Self { disabled: false }.event_type()
@@ -85,17 +94,33 @@ pub struct Recovery {
 // you in.
 
 impl Recovery {
-    /// Enable recovery if it isn't already enabled.
+    /// Enable secret storage *and* backups.
     pub fn enable(&self) -> Enable<'_> {
         // TODO: How to only allow this to be called if you are the only/last device
         // this user has?
-        Enable {
-            recovery: self,
-            progress: Default::default(),
-            wait_for_backups_upload: false,
-            create_new_backup: false,
-            passphrase: Default::default(),
-        }
+        Enable::new(self)
+    }
+
+    /// Enable backups only.
+    pub fn enable_backup(&self) -> EnableBackup<'_> {
+        EnableBackup::new(self)
+    }
+
+    /// Is this device the last device the user has.
+    pub async fn are_we_the_last_man_standing(&self) -> Result<bool> {
+        let olm_machine = self.client.olm_machine().await;
+        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine)?;
+        let user_id = olm_machine.user_id();
+
+        self.ensure_initial_key_query().await?;
+
+        let devices = self.client.encryption().get_user_devices(user_id).await?;
+
+        Ok(devices.devices().count() == 1)
+    }
+
+    pub async fn is_recovery_setup(&self) -> Result<bool> {
+        todo!()
     }
 
     /// Disable recovery completely.
@@ -149,21 +174,6 @@ impl Recovery {
         }
     }
 
-    /// Automatically do the following:
-    ///
-    /// 1. Bootstrap cross-signing keys, if it wasn't already done so.
-    /// 2. Create and enable a backup version if there isn't a currently active
-    ///    one.
-    pub(crate) async fn auto_enable(&self) -> Result<()> {
-        if self.is_globally_disabled().await? {
-            return Ok(());
-        }
-
-        // TODO: Do the enabling.
-
-        Ok(())
-    }
-
     /// What the fuck is this supposed to do if not fetch the secrets from
     /// secret storage? How is that different from the initial restore stuff
     /// from secret storage flow?
@@ -180,25 +190,88 @@ impl Recovery {
         Ok(())
     }
 
-    async fn is_globally_disabled(&self) -> Result<bool> {
+    async fn ensure_initial_key_query(&self) -> Result<()> {
+        let olm_machine = self.client.olm_machine().await;
+        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine)?;
+        let user_id = olm_machine.user_id();
+
+        if self.client.encryption().get_user_identity(user_id).await?.is_none() {
+            let (request_id, request) = olm_machine.query_keys_for_users([olm_machine.user_id()]);
+            self.client.keys_query(&request_id, request.device_keys).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn does_a_user_identity_exist(&self) -> Result<bool> {
+        let olm_machine = self.client.olm_machine().await;
+        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine)?;
+        let user_id = olm_machine.user_id();
+
+        self.ensure_initial_key_query().await?;
+
+        Ok(self.client.encryption().get_user_identity(user_id).await?.is_some())
+    }
+
+    async fn should_auto_enable_backups(&self) -> Result<bool> {
+        // If we didn't already enable backups, we don't see a backup version on the
+        // server and finally if backups have not been marked to be explicitly
+        // disabled, then we can automatically enable them.
+        Ok(!self.client.encryption().backups().is_enabled().await
+            && !self.client.encryption().backups().exists_on_server().await
+            && !self.are_backups_disabled().await?)
+    }
+
+    /// Automatically do the following:
+    ///
+    /// 1. Bootstrap cross-signing keys, if it wasn't already done so.
+    /// 2. Create and enable a backup version if there isn't a currently active
+    ///    one.
+    pub(crate) async fn auto_enable(&self, auth_data: Option<AuthData>) -> Result<()> {
+        // We first try to bootstrap a user identity, this will give us the proper keys
+        // to sign a backup if we create one in the next step.
+        if let Some(auth_data) = auth_data {
+            self.maybe_bootstrap_cross_signing(auth_data).await?;
+        }
+
+        if self.should_auto_enable_backups().await? {
+            self.enable_backup().await?;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) async fn maybe_bootstrap_cross_signing(&self, auth_data: AuthData) -> Result<()> {
+        if !self.does_a_user_identity_exist().await? {
+            if let Err(e) = self.client.encryption().bootstrap_cross_signing(Some(auth_data)).await
+            {
+                // Convert this into a log.
+                todo!("{e:?}");
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn are_backups_disabled(&self) -> Result<bool> {
         Ok(self
             .client
             .account()
-            .fetch_account_data(RecoveryDisabledEventContent::event_type())
+            .fetch_account_data(BackupDisabledContent::event_type())
             .await?
             .map(|event| {
                 event
-                    .deserialize_as::<RecoveryDisabledEventContent>()
+                    .deserialize_as::<BackupDisabledContent>()
                     .map(|event| event.disabled)
                     .unwrap_or(false)
             })
             .unwrap_or(false))
     }
 
-    async fn mark_as_globally_enabled(&self) -> Result<()> {
+    async fn mark_secret_storage_as_enabled(&self) -> Result<()> {
         self.client
             .account()
-            .set_account_data(RecoveryDisabledEventContent { disabled: false })
+            .set_account_data(SecretStorageDisabledContent { disabled: false })
             .await?;
 
         // TODO: We need to listen for this event over `/sync` and if we notice that it
@@ -208,12 +281,20 @@ impl Recovery {
         Ok(())
     }
 
+    async fn mark_backup_as_enabled(&self) -> Result<()> {
+        self.client.account().set_account_data(BackupDisabledContent { disabled: false }).await?;
+
+        Ok(())
+    }
+
     async fn mark_as_globally_disabled(&self) -> Result<()> {
         // Why oh why, can't we delete account data events?
         self.client
             .account()
-            .set_account_data(RecoveryDisabledEventContent { disabled: true })
+            .set_account_data(SecretStorageDisabledContent { disabled: true })
             .await?;
+
+        self.client.account().set_account_data(BackupDisabledContent { disabled: true }).await?;
 
         Ok(())
     }

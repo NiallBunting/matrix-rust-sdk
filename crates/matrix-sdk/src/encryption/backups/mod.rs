@@ -16,16 +16,18 @@
 
 use std::collections::BTreeMap;
 
-use eyeball::ObservableWriteGuard;
 use futures_core::Stream;
 use matrix_sdk_base::crypto::{
     backups::MegolmV1BackupKey, olm::BackedUpRoomKey, store::BackupDecryptionKey,
     types::RoomKeyBackupInfo, GossippedSecret, OlmMachine,
 };
 use ruma::{
-    api::client::backup::{
-        create_backup_version, get_backup_keys, get_backup_keys_for_room,
-        get_backup_keys_for_session, get_latest_backup_info, RoomKeyBackup,
+    api::client::{
+        backup::{
+            create_backup_version, get_backup_keys, get_backup_keys_for_room,
+            get_backup_keys_for_session, get_latest_backup_info, RoomKeyBackup,
+        },
+        error::ErrorKind,
     },
     events::secret::{request::SecretName, send::ToDeviceSecretSendEvent},
     serde::Raw,
@@ -46,8 +48,7 @@ pub struct Backups {
 
 impl Backups {
     fn set_state(&self, state: BackupState) {
-        let mut guard = self.client.inner.backups_state.write();
-        ObservableWriteGuard::set(&mut guard, state);
+        self.client.inner.backups_state.set(state);
     }
 
     async fn enable(
@@ -153,7 +154,7 @@ impl Backups {
         result
     }
 
-    pub(crate) async fn setup(&self) -> Result<(), crate::Error> {
+    pub(crate) async fn setup_and_resume(&self) -> Result<(), crate::Error> {
         info!("Setting up secret listeners and trying to resume backups");
 
         // TODO: We have a nice [`OlmMachine::store()::secrets_strea()`] which we could
@@ -178,7 +179,7 @@ impl Backups {
 
         let decryption_key = BackupDecryptionKey::from_base64(maybe_recovery_key).unwrap();
 
-        let current_version = self.get_current_version().await;
+        let current_version = self.get_current_version().await.unwrap().unwrap();
         let backup_info: RoomKeyBackupInfo = current_version.algorithm.deserialize_as().unwrap();
         let stored_keys = olm_machine.backup_machine().get_backup_keys().await?;
 
@@ -187,54 +188,33 @@ impl Backups {
         {
             todo!("Backups are already enabled")
         } else if decryption_key.backup_key_matches(&backup_info) {
+            info!(
+                "We have found the correct backup recovery key, storing the backup recovery key \
+                 and enabling backups"
+            );
+
             let backup_key = decryption_key.megolm_v1_public_key();
+            backup_key.set_version(current_version.version.to_owned());
 
-            let result = olm_machine.backup_machine().verify_backup(backup_info, false).await;
+            olm_machine
+                .backup_machine()
+                .save_decryption_key(
+                    Some(decryption_key.to_owned()),
+                    Some(current_version.version.to_owned()),
+                )
+                .await
+                .unwrap();
+            olm_machine.backup_machine().enable_backup_v1(backup_key).await.unwrap();
 
-            if let Ok(result) = result {
-                info!("Signature verification on the latest backup version {result:?}");
+            // TODO: Download all keys now, or just leave this task for
+            // when we have a decryption failure?
+            self.set_state(BackupState::Downloading);
+            self.download_all_room_keys(decryption_key, current_version.version).await;
+            self.maybe_trigger_backup();
 
-                // TODO: What's the point of checking if the backup is signed by our master key,
-                // if we received the secret from secret storage or from secret send, is this
-                // some remnant where we used to enable backups without having
-                // access to the backup recovery key?
-                if result.trusted() {
-                    info!(
-                        "The backup is trusted and we have the correct recovery key, \
-                         storing the recovery key and enabling backups"
-                    );
-                    backup_key.set_version(current_version.version.to_owned());
+            self.set_state(BackupState::Enabled);
 
-                    olm_machine
-                        .backup_machine()
-                        .save_decryption_key(
-                            Some(decryption_key.to_owned()),
-                            Some(current_version.version.to_owned()),
-                        )
-                        .await
-                        .unwrap();
-                    olm_machine.backup_machine().enable_backup_v1(backup_key).await.unwrap();
-
-                    // TODO: Download all keys now, or just leave this task for
-                    // when we have a decryption failure?
-                    self.set_state(BackupState::Downloading);
-                    self.download_all_room_keys(decryption_key, current_version.version).await;
-                    self.maybe_trigger_backup();
-
-                    self.set_state(BackupState::Enabled);
-
-                    true
-                } else {
-                    warn!("Found an active backup but the backup is not trusted.");
-
-                    self.set_state(BackupState::Disabled);
-
-                    false
-                }
-            } else {
-                self.set_state(BackupState::Disabled);
-                false
-            }
+            true
         } else {
             warn!(
                 "Found an active backup but the recovery key we received isn't the one used in \
@@ -256,7 +236,7 @@ impl Backups {
         let olm_machine = self.client.olm_machine().await;
         let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
 
-        let current_version = self.get_current_version().await;
+        let current_version = self.get_current_version().await.unwrap().unwrap();
         let backup_info: RoomKeyBackupInfo = current_version.algorithm.deserialize_as().unwrap();
 
         if decryption_key.backup_key_matches(&backup_info) {
@@ -279,9 +259,25 @@ impl Backups {
         }
     }
 
-    async fn get_current_version(&self) -> get_latest_backup_info::v3::Response {
+    async fn get_current_version(
+        &self,
+    ) -> Result<Option<get_latest_backup_info::v3::Response>, crate::Error> {
         let request = get_latest_backup_info::v3::Request::new();
-        self.client.send(request, Default::default()).await.unwrap()
+
+        match self.client.send(request, None).await {
+            Ok(r) => Ok(Some(r)),
+            Err(e) => {
+                if let Some(kind) = e.client_api_error_kind() {
+                    if kind == &ErrorKind::NotFound {
+                        Ok(None)
+                    } else {
+                        Err(e.into())
+                    }
+                } else {
+                    Err(e.into())
+                }
+            }
+        }
     }
 
     async fn resume_backup_from_stored_backup_key(
@@ -468,5 +464,19 @@ impl Backups {
 
     pub fn state(&self) -> BackupState {
         self.client.inner.backups_state.get()
+    }
+
+    pub(crate) async fn is_enabled(&self) -> bool {
+        let olm_machine = self.client.olm_machine().await;
+
+        if let Some(machine) = olm_machine.as_ref() {
+            machine.backup_machine().enabled().await
+        } else {
+            false
+        }
+    }
+
+    pub(crate) async fn exists_on_server(&self) -> bool {
+        self.get_current_version().await.unwrap().is_some()
     }
 }

@@ -36,9 +36,8 @@ struct Cli {
 enum Command {
     /// Disable backups and recovery, whatever the later means.
     Disable,
-    /// Enable backups, can't enable secret storage unless we enter the secret
-    /// storage key, should we generate a new one?
-    Enable,
+    /// Enable backups, don't wait for the backup to be done.
+    EnableBackup,
     /// Change the recovery key, we generate a new one and present the base58
     /// string to the user.
     ChangeRecoveryKey {
@@ -114,32 +113,38 @@ async fn listen_for_backup_state_changes(client: Client) {
 
 async fn logout(client: &Client) -> Result<()> {
     let recovery = client.encryption().recovery();
-    let enable_backup = recovery.enable().wait_for_backups_to_upload().create_new_backup();
 
-    let progress = enable_backup.subscribe_to_progress();
+    if recovery.are_we_the_last_man_standing().await? {
+        let enable_backup = recovery.enable().wait_for_backups_to_upload();
 
-    let task = tokio::spawn(async move {
-        pin_mut!(progress);
+        let progress = enable_backup.subscribe_to_progress();
 
-        while let Some(update) = progress.next().await {
-            println!("Hello world {update:?}");
-        }
-    });
+        let task = tokio::spawn(async move {
+            pin_mut!(progress);
 
-    let recovery_key = enable_backup.await?;
-    println!("Successfully created a recovery key: `{recovery_key}`.");
+            while let Some(update) = progress.next().await {
+                println!("Hello world {update:?}");
+            }
+        });
 
-    task.abort();
+        let recovery_key = enable_backup.await?;
+        println!("Successfully created a recovery key: `{recovery_key}`.");
 
-    Ok(())
+        client.logout().await?;
+
+        task.abort();
+    }
+
+    std::process::exit(0);
 }
 
-async fn enable(client: &Client) -> Result<()> {
+async fn enable_backup(client: &Client) -> Result<()> {
     let recovery = client.encryption().recovery();
-    let enable_backup = recovery.enable();
+    let enable_backup = recovery.enable_backup();
 
-    let recovery_key = enable_backup.await?;
-    println!("Successfully enabled recovery, recovery key: `{recovery_key}`.");
+    enable_backup.await?;
+
+    println!("Successfully enabled backups.");
 
     Ok(())
 }
@@ -168,7 +173,7 @@ async fn run_command(client: &Client, command: Command) -> Result<()> {
     // be nice.
     match command {
         Command::Disable => disable(client).await,
-        Command::Enable => enable(client).await,
+        Command::EnableBackup => enable_backup(client).await,
         Command::ChangeRecoveryKey { mut passphrase } => {
             let ret = reset_key(client, passphrase.as_deref()).await;
             passphrase.zeroize();

@@ -20,7 +20,10 @@ use std::{
 };
 
 use ruma::{
-    api::client::{session::login, uiaa::UserIdentifier},
+    api::client::{
+        session::login::{self, v3::LoginInfo},
+        uiaa::{AuthData, Password, RegistrationToken, UserIdentifier},
+    },
     assign,
     serde::JsonObject,
 };
@@ -42,7 +45,7 @@ enum LoginMethod {
     },
     /// Login type `m.token`
     Token(String),
-    Custom(login::v3::LoginInfo),
+    Custom(LoginInfo),
 }
 
 impl LoginMethod {
@@ -61,12 +64,12 @@ impl LoginMethod {
         }
     }
 
-    fn into_login_info(self) -> login::v3::LoginInfo {
+    fn into_login_info(self) -> LoginInfo {
         match self {
             LoginMethod::UserPassword { id, password } => {
-                login::v3::LoginInfo::Password(login::v3::Password::new(id, password))
+                LoginInfo::Password(login::v3::Password::new(id, password))
             }
-            LoginMethod::Token(token) => login::v3::LoginInfo::Token(login::v3::Token::new(token)),
+            LoginMethod::Token(token) => LoginInfo::Token(login::v3::Token::new(token)),
             LoginMethod::Custom(login_info) => login_info,
         }
     }
@@ -110,7 +113,7 @@ impl LoginBuilder {
         login_type: &str,
         data: JsonObject,
     ) -> serde_json::Result<Self> {
-        let login_info = login::v3::LoginInfo::new(login_type, data)?;
+        let login_info = LoginInfo::new(login_type, data)?;
         Ok(Self::new(auth, LoginMethod::Custom(login_info)))
     }
 
@@ -174,7 +177,9 @@ impl LoginBuilder {
         let homeserver = client.homeserver();
         info!(homeserver = homeserver.as_str(), identifier = ?self.login_method.id(), "Logging in");
 
-        let request = assign!(login::v3::Request::new(self.login_method.into_login_info()), {
+        let login_info = self.login_method.into_login_info();
+
+        let request = assign!(login::v3::Request::new(login_info.to_owned()), {
             device_id: self.device_id.map(Into::into),
             initial_device_display_name: self.initial_device_display_name,
             refresh_token: self.request_refresh_token,
@@ -182,6 +187,23 @@ impl LoginBuilder {
 
         let response = client.send(request, Some(RequestConfig::short_retry())).await?;
         self.auth.receive_login_response(&response).await?;
+
+        // TODO: This is not a good place for this and it will block login for a while.
+        #[cfg(feature = "e2e-encryption")]
+        {
+            // TODO: We need to test each of those. How does this work for OIDC again?
+            let auth_data = match login_info {
+                LoginInfo::Password(p) => {
+                    Some(AuthData::Password(Password::new(p.identifier, p.password)))
+                }
+                LoginInfo::Token(t) => {
+                    Some(AuthData::RegistrationToken(RegistrationToken::new(t.token)))
+                }
+                _ => None,
+            };
+
+            self.auth.client.encryption().recovery().auto_enable(auth_data).await?;
+        }
 
         Ok(response)
     }

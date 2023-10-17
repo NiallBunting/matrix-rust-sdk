@@ -48,7 +48,7 @@ use ruma::{
             profile::get_profile,
             push::{get_notifications::v3::Notification, set_pusher, Pusher},
             room::create_room,
-            session::login::v3::DiscoveryInfo,
+            session::{login::v3::DiscoveryInfo, logout},
             sync::sync_events,
             uiaa,
             user_directory::search_users,
@@ -923,7 +923,7 @@ impl Client {
         self.base_client().set_session_meta(session_meta).await?;
 
         #[cfg(feature = "e2e-encryption")]
-        self.encryption().backups().setup().await?;
+        self.encryption().backups().setup_and_resume().await?;
 
         Ok(())
     }
@@ -949,6 +949,13 @@ impl Client {
                 api.refresh_access_token().await?;
             }
         }
+
+        Ok(())
+    }
+
+    pub async fn logout(&self) -> Result<()> {
+        let request = logout::v3::Request::new();
+        self.send(request, Some(RequestConfig::short_retry())).await?;
 
         Ok(())
     }
