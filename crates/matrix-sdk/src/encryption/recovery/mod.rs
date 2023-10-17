@@ -38,8 +38,6 @@ mod futures;
 
 pub use futures::{Enable, EnableProgress};
 
-use self::futures::EnableBackup;
-
 #[derive(Clone, Debug, Default, Deserialize, Serialize, EventContent)]
 #[ruma_event(type = "m.org.matrix.custom.secret_storage_disabled", kind = GlobalAccountData)]
 struct SecretStorageDisabledContent {
@@ -102,8 +100,12 @@ impl Recovery {
     }
 
     /// Enable backups only.
-    pub fn enable_backup(&self) -> EnableBackup<'_> {
-        EnableBackup::new(self)
+    pub async fn enable_backup(&self) -> Result<()> {
+        self.client.encryption().backups().create().await?;
+        self.mark_backup_as_enabled().await?;
+        self.client.encryption().backups().maybe_trigger_backup();
+
+        Ok(())
     }
 
     /// Is this device the last device the user has.
@@ -146,7 +148,7 @@ impl Recovery {
     ///
     /// This will rotate the secret storage key and re-upload all the secrets to
     /// the [`SecretStore`].
-    pub async fn reset_key(&self, passphrase: Option<&str>) -> Result<Option<String>> {
+    pub async fn reset_key(&self, passphrase: Option<&str>) -> Result<String> {
         // Only do this if we have all the secrets at hand:
         //
         // 1. Cross-signing keys
@@ -155,12 +157,17 @@ impl Recovery {
         // TODO: The `true` here should be replaced with a call to a
         // `do_we_have_all_the_secrets_locally()` method.
         if true {
-            let mut enable = self.enable();
-            enable.passphrase = passphrase;
+            let store = self
+                .client
+                .encryption()
+                .secret_storage()
+                .create_secret_store(passphrase)
+                .await
+                .unwrap();
 
-            let recovery_key = enable.await?;
+            self.mark_secret_storage_as_enabled().await?;
 
-            Ok(Some(recovery_key))
+            Ok(store.secret_storage_key())
         } else {
             // TODO: The else case should open the currently active secret store, the user
             // needs to enter the recovery key, wait a minute!?!? Another case
@@ -170,7 +177,7 @@ impl Recovery {
             //
             // What happens if you don't know the recovery key and are not a trusted device
             // and are the last device?!?
-            Ok(None)
+            todo!("How do we let the user enter the current key here?")
         }
     }
 
