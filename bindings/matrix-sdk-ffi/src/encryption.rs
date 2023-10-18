@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use futures_util::{pin_mut, StreamExt};
 use matrix_sdk::encryption::{backups, recovery};
+use zeroize::Zeroize;
 
 use super::RUNTIME;
 use crate::{error::ClientError, task_handle::TaskHandle};
@@ -166,7 +167,7 @@ impl Encryption {
         &self,
         wait_for_backups_to_upload: bool,
         progress_listener: Box<dyn EnableRecoveryProgressListener>,
-    ) -> Result<String, ClientError> {
+    ) -> Result<(), ClientError> {
         let recovery = self.inner.recovery();
 
         let enable = if wait_for_backups_to_upload {
@@ -183,12 +184,13 @@ impl Encryption {
             }
         });
 
-        let ret = enable.await?;
+        let mut ret = enable.await?;
+        ret.zeroize();
 
         // TODO: Do we need to abort the task manually?
         task.abort();
 
-        Ok(ret)
+        Ok(())
     }
 
     pub async fn disable_recovery(&self) -> Result<(), ClientError> {
