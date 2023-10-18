@@ -108,6 +108,10 @@ impl Recovery {
         Ok(())
     }
 
+    pub async fn wait_for_backups_to_finish_eventually_maybe(&self) -> Result<()> {
+        todo!()
+    }
+
     /// Is this device the last device the user has.
     pub async fn are_we_the_last_man_standing(&self) -> Result<bool> {
         let olm_machine = self.client.olm_machine().await;
@@ -119,6 +123,10 @@ impl Recovery {
         let devices = self.client.encryption().get_user_devices(user_id).await?;
 
         Ok(devices.devices().count() == 1)
+    }
+
+    pub async fn are_we_allowed_to_reset_the_key_without_the_old_one(&self) -> Result<bool> {
+        todo!()
     }
 
     pub async fn is_recovery_setup(&self) -> Result<bool> {
