@@ -110,9 +110,9 @@ impl Backups {
         Ok(())
     }
 
-    pub fn wait_for_steady_state(&self) -> WaitForSteadyState {
+    pub fn wait_for_steady_state(&self) -> WaitForSteadyState<'_> {
         WaitForSteadyState {
-            backups: self.clone(),
+            backups: self,
             progress: self.client.inner.backups_state.upload_progress.clone(),
             timeout: None,
         }

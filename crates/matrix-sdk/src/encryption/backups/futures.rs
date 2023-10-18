@@ -22,13 +22,13 @@ use tracing::trace;
 use super::{Backups, UploadState};
 
 #[derive(Debug)]
-pub struct WaitForSteadyState {
-    pub(super) backups: Backups,
+pub struct WaitForSteadyState<'a> {
+    pub(super) backups: &'a Backups,
     pub(super) progress: SharedObservable<UploadState>,
     pub(super) timeout: Option<Duration>,
 }
 
-impl WaitForSteadyState {
+impl<'a> WaitForSteadyState<'a> {
     pub fn subscribe_to_progress(&self) -> impl Stream<Item = UploadState> {
         self.progress.subscribe_reset()
     }
@@ -40,12 +40,12 @@ impl WaitForSteadyState {
     }
 }
 
-impl IntoFuture for WaitForSteadyState {
+impl<'a> IntoFuture for WaitForSteadyState<'a> {
     type Output = ();
     #[cfg(target_arch = "wasm32")]
-    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output + 'a>>>;
     #[cfg(not(target_arch = "wasm32"))]
-    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send>>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {

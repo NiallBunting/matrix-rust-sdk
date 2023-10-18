@@ -38,8 +38,6 @@ mod futures;
 
 pub use futures::{Enable, EnableProgress};
 
-use super::backups::WaitForSteadyState;
-
 #[derive(Clone, Debug, Default, Deserialize, Serialize, EventContent)]
 #[ruma_event(type = "m.org.matrix.custom.secret_storage_disabled", kind = GlobalAccountData)]
 struct SecretStorageDisabledContent {
@@ -108,11 +106,6 @@ impl Recovery {
         self.client.encryption().backups().maybe_trigger_backup();
 
         Ok(())
-    }
-
-    pub fn wait_for_backup_steady_state(&self) -> WaitForSteadyState {
-        let backups = self.client.encryption().backups();
-        backups.wait_for_steady_state()
     }
 
     /// Is this device the last device the user has.

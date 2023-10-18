@@ -144,9 +144,9 @@ async fn logout(client: &Client) -> Result<()> {
 }
 
 async fn logout_no_recovery(client: &Client) -> Result<()> {
-    let recovery = client.encryption().recovery();
+    let backups = client.encryption().backups();
 
-    let wait = recovery.wait_for_backup_steady_state();
+    let wait = backups.wait_for_steady_state();
 
     println!("Waiting for the room keys to upload.");
 

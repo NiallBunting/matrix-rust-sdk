@@ -141,8 +141,8 @@ impl Encryption {
         &self,
         progress_listener: Option<Box<dyn BackupSteadyStateListener>>,
     ) {
-        let recovery = self.inner.recovery();
-        let wait_for_steady_state = recovery.wait_for_backup_steady_state();
+        let backups = self.inner.backups();
+        let wait_for_steady_state = backups.wait_for_steady_state();
 
         let task = if let Some(listener) = progress_listener {
             let mut progress_stream = wait_for_steady_state.subscribe_to_progress();
