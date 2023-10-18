@@ -22,6 +22,19 @@ pub trait BackupStateListener: Sync + Send {
     fn on_update(&self, status: BackupState);
 }
 
+#[uniffi::export(callback_interface)]
+pub trait BackupSteadyStateListener: Sync + Send {
+    fn on_update(&self, status: BackupUploadState);
+}
+
+#[derive(uniffi::Enum)]
+pub enum BackupUploadState {
+    Waiting,
+    CheckingIfUploadNeeded { backed_up_count: u32, total_count: u32 },
+    Uploading { backed_up_count: u32, total_count: u32 },
+    Done,
+}
+
 #[derive(uniffi::Enum)]
 pub enum BackupState {
     Unknown,
@@ -49,20 +62,37 @@ impl From<backups::BackupState> for BackupState {
     }
 }
 
+impl From<backups::UploadState> for BackupUploadState {
+    fn from(value: backups::UploadState) -> Self {
+        match value {
+            backups::UploadState::Idle => Self::Waiting,
+            backups::UploadState::CheckingIfUploadNeeded(count) => Self::CheckingIfUploadNeeded {
+                backed_up_count: count.backed_up.try_into().unwrap_or(u32::MAX),
+                total_count: count.total.try_into().unwrap_or(u32::MAX),
+            },
+            backups::UploadState::Uploading(count) => Self::Uploading {
+                backed_up_count: count.backed_up.try_into().unwrap_or(u32::MAX),
+                total_count: count.total.try_into().unwrap_or(u32::MAX),
+            },
+            backups::UploadState::Done => Self::Done,
+        }
+    }
+}
+
 #[uniffi::export(callback_interface)]
-pub trait EnableProgressListener: Sync + Send {
-    fn on_update(&self, status: EnableProgress);
+pub trait EnableRecoveryProgressListener: Sync + Send {
+    fn on_update(&self, status: EnableRecoveryProgress);
 }
 
 #[derive(uniffi::Enum)]
-pub enum EnableProgress {
+pub enum EnableRecoveryProgress {
     CreatingBackup,
     CreatingRecoveryKey,
     BackingUp { backed_up_count: u32, total_count: u32 },
     Done { recovery_key: String },
 }
 
-impl From<recovery::EnableProgress> for EnableProgress {
+impl From<recovery::EnableProgress> for EnableRecoveryProgress {
     fn from(value: recovery::EnableProgress) -> Self {
         match &value {
             recovery::EnableProgress::CreatingBackup => Self::CreatingBackup,
@@ -106,10 +136,36 @@ impl Encryption {
         Ok(self.inner.recovery().are_we_the_last_man_standing().await?)
     }
 
+    pub async fn wait_for_backup_upload_steady_state(
+        &self,
+        progress_listener: Option<Box<dyn BackupSteadyStateListener>>,
+    ) {
+        let recovery = self.inner.recovery();
+        let wait_for_steady_state = recovery.wait_for_backup_steady_state();
+
+        let task = if let Some(listener) = progress_listener {
+            let mut progress_stream = wait_for_steady_state.subscribe_to_progress();
+
+            Some(RUNTIME.spawn(async move {
+                while let Some(progress) = progress_stream.next().await {
+                    listener.on_update(progress.into());
+                }
+            }))
+        } else {
+            None
+        };
+
+        wait_for_steady_state.await;
+
+        if let Some(task) = task {
+            task.abort();
+        }
+    }
+
     pub async fn enable_recovery(
         &self,
         wait_for_backups_to_upload: bool,
-        progress_listener: Box<dyn EnableProgressListener>,
+        progress_listener: Box<dyn EnableRecoveryProgressListener>,
     ) -> Result<String, ClientError> {
         let recovery = self.inner.recovery();
 
