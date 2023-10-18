@@ -14,12 +14,16 @@
 
 #![allow(missing_docs)]
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
+use eyeball::SharedObservable;
 use futures_core::Stream;
 use matrix_sdk_base::crypto::{
-    backups::MegolmV1BackupKey, olm::BackedUpRoomKey, store::BackupDecryptionKey,
-    types::RoomKeyBackupInfo, GossippedSecret, OlmMachine,
+    backups::MegolmV1BackupKey,
+    olm::BackedUpRoomKey,
+    store::{BackupDecryptionKey, RoomKeyCounts},
+    types::RoomKeyBackupInfo,
+    GossippedSecret, OlmMachine,
 };
 use ruma::{
     api::client::{
@@ -33,22 +37,65 @@ use ruma::{
     serde::Raw,
     OwnedRoomId,
 };
-use tracing::{info, instrument, warn, Span};
+use tracing::{info, instrument, trace, warn, Span};
 
 mod futures;
 
-pub use futures::{BackupState, UploadBackups};
-
+pub use self::futures::WaitForSteadyState;
 use crate::Client;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Backups {
     pub(super) client: Client,
 }
 
+#[derive(Clone, Debug)]
+pub enum UploadState {
+    Idle,
+    CheckingIfUploadNeeded(RoomKeyCounts),
+    Uploading(RoomKeyCounts),
+    Done,
+}
+
+pub(crate) struct BackupClientState {
+    upload_delay: Duration,
+    pub(crate) upload_progress: SharedObservable<UploadState>,
+    global_state: SharedObservable<BackupState>,
+}
+
+impl Default for BackupClientState {
+    fn default() -> Self {
+        Self {
+            upload_delay: Duration::from_millis(100),
+            upload_progress: SharedObservable::new(UploadState::Idle),
+            global_state: Default::default(),
+        }
+    }
+}
+
+// TODO: Do we want to attach some data to these states? I.e. the backup
+// version?
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackupState {
+    Unknown,
+    Creating,
+    Enabling,
+    Resuming,
+    Enabled,
+    Downloading,
+    Disabling,
+    Disabled,
+}
+
+impl Default for BackupState {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
 impl Backups {
     fn set_state(&self, state: BackupState) {
-        self.client.inner.backups_state.set(state);
+        self.client.inner.backups_state.global_state.set(state);
     }
 
     async fn enable(
@@ -61,6 +108,14 @@ impl Backups {
         self.set_state(BackupState::Enabled);
 
         Ok(())
+    }
+
+    pub fn wait_for_steady_state(&self) -> WaitForSteadyState {
+        WaitForSteadyState {
+            backups: self.clone(),
+            progress: self.client.inner.backups_state.upload_progress.clone(),
+            timeout: None,
+        }
     }
 
     pub async fn create(&self) -> Result<(), crate::Error> {
@@ -359,14 +414,49 @@ impl Backups {
         }
     }
 
-    pub(crate) async fn backup_room_keys(&self) -> UploadBackups<'_> {
+    pub(crate) async fn backup_room_keys(&self) -> Result<(), crate::Error> {
         // TODO: Lock this, so we're uploading only one per client.
 
-        let olm_machine = self.client.olm_machine().await;
-        let olm_machine =
-            olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap().to_owned();
+        trace!("Looking if we need to upload some room keys");
 
-        UploadBackups { backups: self, olm_machine, timeout: None, progress: Default::default() }
+        let olm_machine = self.client.olm_machine().await;
+        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine)?;
+
+        let old_counts = olm_machine.backup_machine().room_key_counts().await?;
+
+        trace!(?old_counts, "Checking the old counts");
+
+        self.client
+            .inner
+            .backups_state
+            .upload_progress
+            .set(UploadState::CheckingIfUploadNeeded(old_counts));
+
+        while let Some((request_id, request)) = olm_machine.backup_machine().backup().await? {
+            trace!(%request_id, "Uploading some room keys");
+
+            let request = ruma::api::client::backup::add_backup_keys::v3::Request::new(
+                request.version,
+                request.rooms,
+            );
+
+            let response = self.client.send(request, Default::default()).await?;
+
+            olm_machine.mark_request_as_sent(&request_id, &response).await?;
+
+            let new_counts = olm_machine.backup_machine().room_key_counts().await?;
+
+            self.client.inner.backups_state.upload_progress.set(UploadState::Uploading(new_counts));
+
+            #[cfg(not(target_arch = "wasm32"))]
+            tokio::time::sleep(self.client.inner.backups_state.upload_delay).await;
+        }
+
+        trace!("No more key to upload");
+
+        self.client.inner.backups_state.upload_progress.set(UploadState::Done);
+
+        Ok(())
     }
 
     async fn handle_downloaded_room_keys(
@@ -459,11 +549,11 @@ impl Backups {
     }
 
     pub fn state_stream(&self) -> impl Stream<Item = BackupState> {
-        self.client.inner.backups_state.subscribe_reset()
+        self.client.inner.backups_state.global_state.subscribe_reset()
     }
 
     pub fn state(&self) -> BackupState {
-        self.client.inner.backups_state.get()
+        self.client.inner.backups_state.global_state.get()
     }
 
     pub(crate) async fn is_enabled(&self) -> bool {

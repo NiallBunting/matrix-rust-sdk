@@ -72,7 +72,7 @@ use crate::{
     authentication::{AuthCtx, AuthData, ReloadSessionCallback, SaveSessionCallback},
     config::RequestConfig,
     deduplicating_handler::DeduplicatingHandler,
-    encryption::backups::BackupState,
+    encryption::backups::BackupClientState,
     error::{HttpError, HttpResult},
     event_handler::{
         EventHandler, EventHandlerDropGuard, EventHandlerHandle, EventHandlerStore, SyncEvent,
@@ -238,7 +238,7 @@ pub(crate) struct ClientInner {
     /// wait for the sync to get the data to fetch a room object from the state
     /// store.
     pub(crate) sync_beat: event_listener::Event,
-    pub(crate) backups_state: SharedObservable<BackupState>,
+    pub(crate) backups_state: BackupClientState,
 }
 
 impl ClientInner {
@@ -273,7 +273,7 @@ impl ClientInner {
             room_update_channels: Default::default(),
             respect_login_well_known,
             sync_beat: event_listener::Event::new(),
-            backups_state: SharedObservable::new(Default::default()),
+            backups_state: Default::default(),
         };
 
         let client = Arc::new(client);

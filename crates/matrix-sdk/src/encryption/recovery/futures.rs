@@ -21,7 +21,10 @@ use matrix_sdk_base::crypto::store::RoomKeyCounts;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::Recovery;
-use crate::{encryption::secret_storage::SecretStore, Result};
+use crate::{
+    encryption::{backups::UploadState, secret_storage::SecretStore},
+    Result,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub enum EnableProgress {
@@ -101,7 +104,7 @@ impl<'a> IntoFuture for Enable<'a> {
 
             if wait_for_backups_upload {
                 let backups = recovery.client.encryption().backups();
-                let upload_future = backups.backup_room_keys().await;
+                let upload_future = backups.wait_for_steady_state();
                 let upload_progress = upload_future.subscribe_to_progress();
 
                 let progress_task = matrix_sdk_common::executor::spawn({
@@ -110,12 +113,18 @@ impl<'a> IntoFuture for Enable<'a> {
                         pin_mut!(upload_progress);
 
                         while let Some(update) = upload_progress.next().await {
-                            progress.set(EnableProgress::BackingUp(update));
+                            match update {
+                                UploadState::Uploading(count) => {
+                                    progress.set(EnableProgress::BackingUp(count));
+                                }
+                                UploadState::Done => break,
+                                _ => (),
+                            }
                         }
                     }
                 });
 
-                upload_future.await?;
+                upload_future.await;
                 progress_task.abort();
             } else {
                 recovery.client.encryption().backups().maybe_trigger_backup();

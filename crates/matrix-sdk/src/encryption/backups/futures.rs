@@ -16,41 +16,20 @@ use std::{future::IntoFuture, pin::Pin, time::Duration};
 
 use eyeball::SharedObservable;
 use futures_core::{Future, Stream};
-use matrix_sdk_base::crypto::{store::RoomKeyCounts, OlmMachine};
+use futures_util::pin_mut;
 use tracing::trace;
 
-use super::Backups;
-
-// TODO: Do we want to attach some data to these states? I.e. the backup
-// version?
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BackupState {
-    Unknown,
-    Creating,
-    Enabling,
-    Resuming,
-    Enabled,
-    Downloading,
-    Disabling,
-    Disabled,
-}
-
-impl Default for BackupState {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
+use super::{Backups, UploadState};
 
 #[derive(Debug)]
-pub struct UploadBackups<'a> {
-    pub(super) backups: &'a Backups,
-    pub(super) olm_machine: OlmMachine,
+pub struct WaitForSteadyState {
+    pub(super) backups: Backups,
+    pub(super) progress: SharedObservable<UploadState>,
     pub(super) timeout: Option<Duration>,
-    pub(super) progress: SharedObservable<RoomKeyCounts>,
 }
 
-impl<'a> UploadBackups<'a> {
-    pub fn subscribe_to_progress(&self) -> impl Stream<Item = RoomKeyCounts> {
+impl WaitForSteadyState {
+    pub fn subscribe_to_progress(&self) -> impl Stream<Item = UploadState> {
         self.progress.subscribe_reset()
     }
 
@@ -61,42 +40,42 @@ impl<'a> UploadBackups<'a> {
     }
 }
 
-impl<'a> IntoFuture for UploadBackups<'a> {
-    type Output = crate::Result<()>;
+impl IntoFuture for WaitForSteadyState {
+    type Output = ();
     #[cfg(target_arch = "wasm32")]
-    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + 'a>>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
     #[cfg(not(target_arch = "wasm32"))]
-    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send>>;
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            let Self { backups, olm_machine, timeout, progress } = self;
+            let Self { backups, timeout, progress } = self;
 
-            while let Some((request_id, request)) = olm_machine.backup_machine().backup().await? {
-                trace!(%request_id, "Uploading some room keys");
+            let stream = progress.subscribe_reset();
+            pin_mut!(stream);
 
-                let request = ruma::api::client::backup::add_backup_keys::v3::Request::new(
-                    request.version,
-                    request.rooms,
-                );
+            // TODO: Set the delay here
+            if let Some(_delay) = timeout {
+                let _old_delay = backups.client.inner.backups_state.upload_delay;
+            }
 
-                let response = backups.client.send(request, Default::default()).await?;
+            trace!("Waiting for the upload steady state");
 
-                olm_machine.mark_request_as_sent(&request_id, &response).await?;
+            backups.maybe_trigger_backup();
 
-                if progress.subscriber_count() != 0 {
-                    let new_counts = olm_machine.backup_machine().room_key_counts().await?;
+            // TODO: Do we want to be smart here and remember the count when we started
+            // waiting and prevent the total from increasing, in case new room
+            // keys arrive after we started waiting.
+            while let Some(state) = stream.next().await {
+                trace!(?state, "Update state while waiting for the backup steady state");
 
-                    progress.set(new_counts);
-                }
-
-                #[cfg(not(target_arch = "wasm32"))]
-                if let Some(timeout) = timeout {
-                    tokio::time::sleep(timeout).await;
+                match state {
+                    UploadState::Done => break,
+                    _ => (),
                 }
             }
 
-            Ok(())
+            // TODO: Reset the delay here.
         })
     }
 }

@@ -19,6 +19,7 @@ use tracing::{trace, warn};
 
 use super::ClientInner;
 use crate::{
+    encryption::backups::UploadState,
     executor::{spawn, JoinHandle},
     Client,
 };
@@ -71,14 +72,17 @@ impl BackupUploadingTask {
             trace!("Received a command to backup room keys");
 
             if let Some(client) = client.upgrade() {
+                trace!("Found a client, trying to backup some room keys");
+
                 let client = Client { inner: client };
-                let backups = client.encryption().backups();
 
-                let upload_future = backups.backup_room_keys().await;
-
-                if let Err(e) = upload_future.await {
+                if let Err(e) = client.encryption().backups().backup_room_keys().await {
                     warn!("Error backing up room keys {e:?}");
                 }
+
+                trace!("Done backing up, going back to idle");
+
+                client.inner.backups_state.upload_progress.set(UploadState::Idle);
             } else {
                 trace!("Client got dropped, shutting down the task");
                 break;

@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use anyhow::Result;
 use clap::Parser;
 use futures_util::{pin_mut, StreamExt};
@@ -49,6 +51,9 @@ enum Command {
     /// Logout, if recovery isn't enabled, ask the user if they want to do so
     /// now.
     Logout,
+    /// Logout without setting up recovery, still wait for room keys to be
+    /// uploaded.
+    LogoutNoRecovery,
     Recover {
         /// The recovery key, AKA the secret storage key, this key will be used
         /// to open the secret-store. Not to be confused with the
@@ -115,9 +120,9 @@ async fn logout(client: &Client) -> Result<()> {
     let recovery = client.encryption().recovery();
 
     if recovery.are_we_the_last_man_standing().await? {
-        let enable_backup = recovery.enable().wait_for_backups_to_upload();
+        let enable_recovery = recovery.enable().wait_for_backups_to_upload();
 
-        let progress = enable_backup.subscribe_to_progress();
+        let progress = enable_recovery.subscribe_to_progress();
 
         let task = tokio::spawn(async move {
             pin_mut!(progress);
@@ -127,13 +132,29 @@ async fn logout(client: &Client) -> Result<()> {
             }
         });
 
-        let recovery_key = enable_backup.await?;
+        let recovery_key = enable_recovery.await?;
         println!("Successfully created a recovery key: `{recovery_key}`.");
-
-        client.logout().await?;
 
         task.abort();
     }
+
+    client.logout().await?;
+
+    std::process::exit(0);
+}
+
+async fn logout_no_recovery(client: &Client) -> Result<()> {
+    let recovery = client.encryption().recovery();
+
+    let wait = recovery.wait_for_backup_steady_state();
+
+    println!("Waiting for the room keys to upload.");
+
+    wait.await;
+
+    client.logout().await?;
+    println!("Successfully logged out. Exiting...");
+    std::io::stdout().flush().expect("Unable to write to stdout");
 
     std::process::exit(0);
 }
@@ -158,12 +179,11 @@ async fn disable(client: &Client) -> Result<()> {
 }
 
 async fn reset_key(client: &Client, passphrase: Option<&str>) -> Result<()> {
-    if let Some(mut recovery_key) = client.encryption().recovery().reset_key(passphrase).await? {
-        println!("Successfully changed the recovery key, new key: `{recovery_key}`.");
-        recovery_key.zeroize();
-    } else {
-        println!("Could not change the recovery key as we don't have access to all the secrets.")
-    }
+    // TODO: Check if we should be able to reset the key and then ask for the
+    // existing one if we're not supposed to.
+    let mut recovery_key = client.encryption().recovery().reset_key(passphrase).await?;
+    println!("Successfully changed the recovery key, new key: `{recovery_key}`.");
+    recovery_key.zeroize();
 
     Ok(())
 }
@@ -186,6 +206,7 @@ async fn run_command(client: &Client, command: Command) -> Result<()> {
             ret
         }
         Command::Logout => logout(client).await,
+        Command::LogoutNoRecovery => logout_no_recovery(client).await,
     }
 }
 
