@@ -87,12 +87,7 @@ async fn create() {
         assert_eq!(counter, 1, "We should have gone through 2 states");
     });
 
-    client
-        .encryption()
-        .backups()
-        .create()
-        .await
-        .expect("We should be able to create a new backup");
+    client.encryption().backups().create().await.expect("We should be able to create a new backup");
 
     assert_eq!(
         client.encryption().backups().state(),
@@ -216,12 +211,7 @@ async fn disabling() {
         "We should initially be in the unknown state"
     );
 
-    client
-        .encryption()
-        .backups()
-        .create()
-        .await
-        .expect("We should be able to create a new backup");
+    client.encryption().backups().create().await.expect("We should be able to create a new backup");
 
     assert_eq!(
         client.encryption().backups().state(),

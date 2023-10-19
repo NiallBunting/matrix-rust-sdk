@@ -146,6 +146,7 @@ async fn secret_store_create_default_key() {
 
     let _ = client
         .encryption()
+        .secret_storage()
         .open_secret_store(SECRET_STORE_KEY)
         .await
         .expect("We should be able to open our secret store with a new default key");
@@ -187,7 +188,7 @@ async fn secret_store_missing_key_info() {
         .mount(&server)
         .await;
 
-    let ret = client.encryption().open_secret_store(SECRET_STORE_KEY).await;
+    let ret = client.encryption().secret_storage().open_secret_store(SECRET_STORE_KEY).await;
 
     let found_key_id = assert_matches!(
         ret,
@@ -237,6 +238,7 @@ async fn secret_store_opening() {
 
     let secret_store = client
         .encryption()
+        .secret_storage()
         .open_secret_store(SECRET_STORE_KEY)
         .await
         .expect("We should be able to open our secret store");
@@ -267,6 +269,7 @@ async fn set_in_secret_store() {
 
     let secret_store = client
         .encryption()
+        .secret_storage()
         .open_secret_store(SECRET_STORE_KEY)
         .await
         .expect("We should be able to open our secret store");
@@ -499,6 +502,7 @@ async fn restore_cross_signing_from_secret_store() {
 
     let secret_store = client
         .encryption()
+        .secret_storage()
         .open_secret_store(SECRET_STORE_KEY)
         .await
         .expect("We should be able to open our secret store");
