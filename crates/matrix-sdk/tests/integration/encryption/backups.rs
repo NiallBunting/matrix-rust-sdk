@@ -57,25 +57,23 @@ async fn create() {
         "We should initially be in the unknown state"
     );
 
-    let states = client.encryption().backups().state_stream();
+    let mut states = client.encryption().backups().state_stream();
 
     let task = spawn(async move {
-        pin_mut!(states);
-
         let mut counter = 0;
 
         while let Some(state) = states.next().await {
             match state {
-                // BackupState::Unknown => {
-                //     assert_eq!(counter, 0, "The initial state should be unknown");
-                //     counter += 1;
-                // }
+                BackupState::Unknown => {
+                    assert_eq!(counter, 0, "The initial state should be unknown");
+                    counter += 1;
+                }
                 BackupState::Creating => {
-                    assert_eq!(counter, 0, "The second state should be the creation state");
+                    assert_eq!(counter, 1, "The second state should be the creation state");
                     counter += 1;
                 }
                 BackupState::Enabled => {
-                    assert_eq!(counter, 1, "The third and final state should be the enabled state");
+                    assert_eq!(counter, 2, "The third and final state should be the enabled state");
                     break;
                 }
                 state => {
@@ -84,7 +82,7 @@ async fn create() {
             }
         }
 
-        assert_eq!(counter, 1, "We should have gone through 2 states");
+        assert_eq!(counter, 2, "We should have gone through 3 states");
     });
 
     client.encryption().backups().create().await.expect("We should be able to create a new backup");
