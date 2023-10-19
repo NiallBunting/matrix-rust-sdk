@@ -342,7 +342,7 @@ impl Backups {
 
         if decryption_key.backup_key_matches(&backup_info) {
             let backup_key = decryption_key.megolm_v1_public_key();
-            olm_machine.backup_machine().enable_backup_v1(backup_key).await.unwrap();
+            self.enable(olm_machine, backup_key).await?;
 
             if let Some(version) = version {
                 if current_version.version != version {
