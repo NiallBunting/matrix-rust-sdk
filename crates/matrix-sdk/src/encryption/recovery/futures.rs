@@ -14,15 +14,18 @@
 
 use std::{future::IntoFuture, pin::Pin};
 
-use eyeball::SharedObservable;
 use futures_core::{Future, Stream};
 use futures_util::{pin_mut, StreamExt};
 use matrix_sdk_base::crypto::store::RoomKeyCounts;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::Recovery;
 use crate::{
-    encryption::{backups::UploadState, secret_storage::SecretStore},
+    encryption::{
+        backups::{ChannelObservable, UploadState},
+        secret_storage::SecretStore,
+    },
     Result,
 };
 
@@ -42,7 +45,7 @@ impl Default for EnableProgress {
 
 pub struct Enable<'a> {
     pub(super) recovery: &'a Recovery,
-    pub(super) progress: SharedObservable<EnableProgress>,
+    pub(super) progress: ChannelObservable<EnableProgress>,
     pub(super) wait_for_backups_upload: bool,
     pub(super) passphrase: Option<&'a str>,
 }
@@ -57,8 +60,10 @@ impl<'a> Enable<'a> {
         }
     }
 
-    pub fn subscribe_to_progress(&self) -> impl Stream<Item = EnableProgress> {
-        self.progress.subscribe_reset()
+    pub fn subscribe_to_progress(
+        &self,
+    ) -> impl Stream<Item = Result<EnableProgress, BroadcastStreamRecvError>> {
+        self.progress.subscribe()
     }
 
     pub fn wait_for_backups_to_upload(mut self) -> Self {
@@ -114,10 +119,11 @@ impl<'a> IntoFuture for Enable<'a> {
 
                         while let Some(update) = upload_progress.next().await {
                             match update {
-                                UploadState::Uploading(count) => {
+                                Ok(UploadState::Uploading(count)) => {
                                     progress.set(EnableProgress::BackingUp(count));
                                 }
-                                UploadState::Done => break,
+                                Ok(UploadState::Done) => break,
+                                Err(_) => break,
                                 _ => (),
                             }
                         }

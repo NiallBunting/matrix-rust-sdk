@@ -83,6 +83,8 @@ async fn listen_for_backup_state_changes(client: Client) {
     pin_mut!(stream);
 
     while let Some(state) = stream.next().await {
+        let Ok(state) = state else { panic!("Error while receiving backup state updates") };
+
         match state {
             BackupState::Unknown => (),
             BackupState::Enabling => println!("Trying to enable backups"),
@@ -114,7 +116,8 @@ async fn main() -> Result<()> {
 
     client.sync_once(Default::default()).await?;
 
-    let secret_store = client.encryption().open_secret_store(&cli.secret_store_key).await?;
+    let secret_store =
+        client.encryption().secret_storage().open_secret_store(&cli.secret_store_key).await?;
 
     let _task = tokio::spawn({
         let client = client.to_owned();

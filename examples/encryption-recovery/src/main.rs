@@ -2,7 +2,7 @@ use std::io::Write;
 
 use anyhow::Result;
 use clap::Parser;
-use futures_util::{pin_mut, StreamExt};
+use futures_util::StreamExt;
 use matrix_sdk::{config::SyncSettings, encryption::backups::BackupState, Client};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use url::Url;
@@ -99,10 +99,13 @@ async fn login(cli: &Cli) -> Result<Client> {
 }
 
 async fn listen_for_backup_state_changes(client: Client) {
-    let stream = client.encryption().backups().state_stream();
-    pin_mut!(stream);
+    let mut stream = client.encryption().backups().state_stream();
 
     while let Some(state) = stream.next().await {
+        let Ok(state) = state else {
+            panic!("Receive error while waiting for updates to the backup state")
+        };
+
         match state {
             BackupState::Unknown => (),
             BackupState::Enabling => println!("Trying to enable backups"),
@@ -122,11 +125,9 @@ async fn logout(client: &Client) -> Result<()> {
     if recovery.are_we_the_last_man_standing().await? {
         let enable_recovery = recovery.enable().wait_for_backups_to_upload();
 
-        let progress = enable_recovery.subscribe_to_progress();
+        let mut progress = enable_recovery.subscribe_to_progress();
 
         let task = tokio::spawn(async move {
-            pin_mut!(progress);
-
             while let Some(update) = progress.next().await {
                 println!("Hello world {update:?}");
             }
@@ -147,10 +148,20 @@ async fn logout_no_recovery(client: &Client) -> Result<()> {
     let backups = client.encryption().backups();
 
     let wait = backups.wait_for_steady_state();
+    let mut progress = wait.subscribe_to_progress();
+
+    let task = tokio::spawn(async move {
+        while let Some(update) = progress.next().await {
+            println!("Hello world {update:?}");
+            std::io::stdout().flush().expect("Unable to write to stdout");
+        }
+    });
 
     println!("Waiting for the room keys to upload.");
 
     wait.await;
+
+    task.abort();
 
     client.logout().await?;
     println!("Successfully logged out. Exiting...");

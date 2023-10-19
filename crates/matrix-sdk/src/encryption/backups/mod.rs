@@ -14,10 +14,14 @@
 
 #![allow(missing_docs)]
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
-use eyeball::SharedObservable;
 use futures_core::Stream;
+use futures_util::StreamExt;
 use matrix_sdk_base::crypto::{
     backups::MegolmV1BackupKey,
     olm::BackedUpRoomKey,
@@ -37,12 +41,54 @@ use ruma::{
     serde::Raw,
     OwnedRoomId,
 };
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use tracing::{info, instrument, trace, warn, Span};
 
 mod futures;
 
 pub use self::futures::WaitForSteadyState;
 use crate::Client;
+
+#[derive(Clone, Debug)]
+pub struct ChannelObservable<T: Clone + Send> {
+    value: Arc<RwLock<T>>,
+    channel: broadcast::Sender<T>,
+}
+
+impl<T: Default + Clone + Send + 'static> Default for ChannelObservable<T> {
+    fn default() -> Self {
+        let value = Default::default();
+        Self::new(value)
+    }
+}
+
+impl<T: 'static + Send + Clone> ChannelObservable<T> {
+    pub fn new(value: T) -> Self {
+        let channel = broadcast::Sender::new(100);
+        Self { value: RwLock::new(value).into(), channel }
+    }
+
+    pub fn subscribe(&self) -> impl Stream<Item = Result<T, BroadcastStreamRecvError>> {
+        let current_value = self.value.read().unwrap().to_owned();
+        let initial_stream = tokio_stream::once(Ok(current_value));
+        let broadcast_stream = BroadcastStream::new(self.channel.subscribe());
+
+        let combined = initial_stream.chain(broadcast_stream);
+
+        combined
+    }
+
+    pub fn set(&self, new_value: T) {
+        *self.value.write().unwrap() = new_value.to_owned();
+        // We're ignoring the error case where no receivers exist.
+        let _ = self.channel.send(new_value);
+    }
+
+    pub fn get(&self) -> T {
+        self.value.read().unwrap().to_owned()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Backups {
@@ -59,15 +105,15 @@ pub enum UploadState {
 
 pub(crate) struct BackupClientState {
     upload_delay: Duration,
-    pub(crate) upload_progress: SharedObservable<UploadState>,
-    global_state: SharedObservable<BackupState>,
+    pub(crate) upload_progress: ChannelObservable<UploadState>,
+    global_state: ChannelObservable<BackupState>,
 }
 
 impl Default for BackupClientState {
     fn default() -> Self {
         Self {
             upload_delay: Duration::from_millis(100),
-            upload_progress: SharedObservable::new(UploadState::Idle),
+            upload_progress: ChannelObservable::new(UploadState::Idle),
             global_state: Default::default(),
         }
     }
@@ -548,8 +594,10 @@ impl Backups {
         self.handle_downloaded_room_keys(response, decryption_key, olm_machine).await;
     }
 
-    pub fn state_stream(&self) -> impl Stream<Item = BackupState> {
-        self.client.inner.backups_state.global_state.subscribe_reset()
+    pub fn state_stream(
+        &self,
+    ) -> impl Stream<Item = Result<BackupState, BroadcastStreamRecvError>> {
+        self.client.inner.backups_state.global_state.subscribe()
     }
 
     pub fn state(&self) -> BackupState {

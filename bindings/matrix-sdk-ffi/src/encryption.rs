@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use futures_util::{pin_mut, StreamExt};
+use futures_util::StreamExt;
 use matrix_sdk::encryption::{backups, recovery};
 use zeroize::Zeroize;
 
@@ -112,12 +112,12 @@ impl From<recovery::EnableProgress> for EnableRecoveryProgress {
 #[uniffi::export]
 impl Encryption {
     pub fn backup_state_listener(&self, listener: Box<dyn BackupStateListener>) -> Arc<TaskHandle> {
-        let stream = self.inner.backups().state_stream();
+        let mut stream = self.inner.backups().state_stream();
 
         let stream_task = TaskHandle::new(RUNTIME.spawn(async move {
-            pin_mut!(stream);
-
             while let Some(state) = stream.next().await {
+                // TODO: Do we want to abort if theres's an error here?
+                let Ok(state) = state else { continue };
                 listener.on_update(state.into());
             }
         }));
@@ -149,6 +149,8 @@ impl Encryption {
 
             Some(RUNTIME.spawn(async move {
                 while let Some(progress) = progress_stream.next().await {
+                    // TODO: Do we want to abort if theres's an error here?
+                    let Ok(progress) = progress else { continue };
                     listener.on_update(progress.into());
                 }
             }))
@@ -180,6 +182,8 @@ impl Encryption {
 
         let task = RUNTIME.spawn(async move {
             while let Some(progress) = progress_stream.next().await {
+                // TODO: Do we want to abort if theres's an error here?
+                let Ok(progress) = progress else { continue };
                 progress_listener.on_update(progress.into());
             }
         });

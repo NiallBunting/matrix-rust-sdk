@@ -14,23 +14,25 @@
 
 use std::{future::IntoFuture, pin::Pin, time::Duration};
 
-use eyeball::SharedObservable;
 use futures_core::{Future, Stream};
-use futures_util::pin_mut;
+use futures_util::StreamExt;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tracing::trace;
 
-use super::{Backups, UploadState};
+use super::{Backups, ChannelObservable, UploadState};
 
 #[derive(Debug)]
 pub struct WaitForSteadyState<'a> {
     pub(super) backups: &'a Backups,
-    pub(super) progress: SharedObservable<UploadState>,
+    pub(super) progress: ChannelObservable<UploadState>,
     pub(super) timeout: Option<Duration>,
 }
 
 impl<'a> WaitForSteadyState<'a> {
-    pub fn subscribe_to_progress(&self) -> impl Stream<Item = UploadState> {
-        self.progress.subscribe_reset()
+    pub fn subscribe_to_progress(
+        &self,
+    ) -> impl Stream<Item = Result<UploadState, BroadcastStreamRecvError>> {
+        self.progress.subscribe()
     }
 
     pub fn with_delay(mut self, delay: Duration) -> Self {
@@ -51,8 +53,7 @@ impl<'a> IntoFuture for WaitForSteadyState<'a> {
         Box::pin(async move {
             let Self { backups, timeout, progress } = self;
 
-            let stream = progress.subscribe_reset();
-            pin_mut!(stream);
+            let mut stream = progress.subscribe();
 
             // TODO: Set the delay here
             if let Some(_delay) = timeout {
@@ -70,7 +71,8 @@ impl<'a> IntoFuture for WaitForSteadyState<'a> {
                 trace!(?state, "Update state while waiting for the backup steady state");
 
                 match state {
-                    UploadState::Done => break,
+                    Ok(UploadState::Done) => break,
+                    Err(_) => break,
                     _ => (),
                 }
             }

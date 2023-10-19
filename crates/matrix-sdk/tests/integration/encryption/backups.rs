@@ -63,6 +63,8 @@ async fn create() {
         let mut counter = 0;
 
         while let Some(state) = states.next().await {
+            let Ok(state) = state else { panic!("Error while receiving backup state updates") };
+
             match state {
                 BackupState::Unknown => {
                     assert_eq!(counter, 0, "The initial state should be unknown");
@@ -74,6 +76,7 @@ async fn create() {
                 }
                 BackupState::Enabled => {
                     assert_eq!(counter, 2, "The third and final state should be the enabled state");
+                    counter += 1;
                     break;
                 }
                 state => {
@@ -82,7 +85,7 @@ async fn create() {
             }
         }
 
-        assert_eq!(counter, 2, "We should have gone through 3 states");
+        assert_eq!(counter, 3, "We should have gone through 3 states");
     });
 
     client.encryption().backups().create().await.expect("We should be able to create a new backup");
@@ -134,16 +137,23 @@ async fn creation_failure() {
         pin_mut!(states);
 
         let mut counter = 0;
+        let mut unknown_counter = 0;
 
         while let Some(state) = states.next().await {
+            let Ok(state) = state else { panic!("Error while receiving backup state updates") };
+
             match state {
                 BackupState::Creating => {
-                    assert_eq!(counter, 0, "The second state should be the creation state");
+                    assert_eq!(counter, 1, "The second state should be the creation state");
                     counter += 1;
                 }
                 BackupState::Unknown => {
-                    assert_eq!(counter, 1, "The final state should be the unknown state");
-                    break;
+                    counter += 1;
+                    unknown_counter += 1;
+
+                    if counter == 3 {
+                        break;
+                    };
                 }
                 state => {
                     panic!("Received an invalid state for the creation of the backp {state:?}")
@@ -151,7 +161,8 @@ async fn creation_failure() {
             }
         }
 
-        assert_eq!(counter, 1, "We should have gone through 2 states");
+        assert_eq!(unknown_counter, 2, "We should have gone through 2 Unknown states");
+        assert_eq!(counter, 3, "We should have gone through 3 states");
     });
 
     client
@@ -227,15 +238,20 @@ async fn disabling() {
         let mut counter = 0;
 
         while let Some(state) = states.next().await {
-            println!("{state:?}");
+            let Ok(state) = state else { panic!("Error while receiving backup state updates") };
 
             match state {
+                BackupState::Enabled => {
+                    assert_eq!(counter, 0, "The initial state should be the enabled state");
+                    counter += 1;
+                }
                 BackupState::Disabling => {
-                    assert_eq!(counter, 0, "The second state should be the disabling state");
+                    assert_eq!(counter, 1, "The second state should be the disabling state");
                     counter += 1;
                 }
                 BackupState::Disabled => {
-                    assert_eq!(counter, 1, "The final state should be the disabled state");
+                    assert_eq!(counter, 2, "The final state should be the disabled state");
+                    counter += 1;
                     break;
                 }
                 state => {
@@ -244,7 +260,7 @@ async fn disabling() {
             }
         }
 
-        assert_eq!(counter, 1, "We should have gone through 2 states");
+        assert_eq!(counter, 3, "We should have gone through 3 states");
     });
 
     assert_eq!(
