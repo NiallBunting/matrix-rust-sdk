@@ -40,6 +40,7 @@ use ruma::{
     serde::Raw,
     OwnedRoomId,
 };
+use serde::de::Error;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use tracing::{info, instrument, trace, warn, Span};
@@ -283,7 +284,9 @@ impl Backups {
         let olm_machine = self.client.olm_machine().await;
         let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine)?;
 
-        let decryption_key = BackupDecryptionKey::from_base64(maybe_recovery_key).unwrap();
+        let decryption_key = BackupDecryptionKey::from_base64(maybe_recovery_key).map_err(|e| {
+            serde_json::Error::custom(format!("Couldn't deserialize the backup key: {e:?}"))
+        })?;
 
         let current_version = self.get_current_version().await?;
 
@@ -320,7 +323,13 @@ impl Backups {
             // TODO: Download all keys now, or just leave this task for
             // when we have a decryption failure?
             self.set_state(BackupState::Downloading);
-            self.download_all_room_keys(decryption_key, current_version.version).await;
+
+            if let Err(_e) =
+                self.download_all_room_keys(decryption_key, current_version.version).await
+            {
+                // TODO: Log a warning here?
+            }
+
             self.maybe_trigger_backup();
 
             self.set_state(BackupState::Enabled);
@@ -412,30 +421,34 @@ impl Backups {
         }
     }
 
-    async fn maybe_resume_from_secret_inbox(&self, olm_machine: &OlmMachine) {
-        let secrets =
-            olm_machine.store().get_secrets_from_inbox(&SecretName::RecoveryKey).await.unwrap();
+    async fn maybe_resume_from_secret_inbox(
+        &self,
+        olm_machine: &OlmMachine,
+    ) -> Result<(), crate::Error> {
+        let secrets = olm_machine.store().get_secrets_from_inbox(&SecretName::RecoveryKey).await?;
 
         for secret in secrets {
-            if self.handle_received_secret(secret).await {
+            if self.handle_received_secret(secret).await? {
                 break;
             }
         }
 
-        olm_machine.store().delete_secrets_from_inbox(&SecretName::RecoveryKey).await.unwrap();
+        olm_machine.store().delete_secrets_from_inbox(&SecretName::RecoveryKey).await?;
+
+        Ok(())
     }
 
     /// Check and re-enable a backup if we have a backup recovery key locally.
     async fn maybe_resume_backups(&self) -> Result<(), crate::Error> {
         let olm_machine = self.client.olm_machine().await;
-        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
+        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine)?;
 
         // Let us first check if we have a stored backup recovery key and a backup
         // version.
         if !self.resume_backup_from_stored_backup_key(olm_machine).await? {
             // We didn't manage to enable backups from a stored backup recovery key, let us
             // check our secret inbox. Perhaps we can find a valid key there.
-            self.maybe_resume_from_secret_inbox(olm_machine).await;
+            self.maybe_resume_from_secret_inbox(olm_machine).await?;
         }
 
         Ok(())
@@ -449,23 +462,30 @@ impl Backups {
         // that's fixed, stop listening to individual secret send events and
         // listen to the secrets stream.
         if let Some(olm_machine) = olm_machine.as_ref() {
-            client.encryption().backups().maybe_resume_from_secret_inbox(olm_machine).await;
+            if let Err(_e) =
+                client.encryption().backups().maybe_resume_from_secret_inbox(olm_machine).await
+            {
+                // TODO: Log a warning here.
+            }
         }
     }
 
-    pub(crate) async fn handle_received_secret(&self, secret: GossippedSecret) -> bool {
+    pub(crate) async fn handle_received_secret(
+        &self,
+        secret: GossippedSecret,
+    ) -> Result<bool, crate::Error> {
         if secret.secret_name == SecretName::RecoveryKey {
-            if self.maybe_enable_backups(&secret.event.content.secret).await.unwrap() {
+            if self.maybe_enable_backups(&secret.event.content.secret).await? {
                 let olm_machine = self.client.olm_machine().await;
-                let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
-                olm_machine.store().delete_secrets_from_inbox(&secret.secret_name).await.unwrap();
+                let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine)?;
+                olm_machine.store().delete_secrets_from_inbox(&secret.secret_name).await?;
 
-                true
+                Ok(true)
             } else {
-                false
+                Ok(false)
             }
         } else {
-            false
+            Ok(false)
         }
     }
 
@@ -527,7 +547,7 @@ impl Backups {
         backed_up_keys: get_backup_keys::v3::Response,
         backup_decryption_key: BackupDecryptionKey,
         olm_machine: &OlmMachine,
-    ) {
+    ) -> Result<(), crate::Error> {
         let mut decrypted_room_keys: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
 
         for (room_id, room_keys) in backed_up_keys.rooms {
@@ -552,36 +572,46 @@ impl Backups {
         olm_machine
             .backup_machine()
             .import_backed_up_room_keys(decrypted_room_keys, |_, _| {})
-            .await
-            .unwrap();
+            .await?;
+
+        Ok(())
     }
 
-    pub async fn download_room_keys_for_room(&self, room_id: OwnedRoomId) {
+    pub async fn download_room_keys_for_room(
+        &self,
+        room_id: OwnedRoomId,
+    ) -> Result<(), crate::Error> {
         let olm_machine = self.client.olm_machine().await;
-        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
+        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine)?;
 
-        let backup_keys = olm_machine.store().load_backup_keys().await.unwrap();
+        let backup_keys = olm_machine.store().load_backup_keys().await?;
 
         if let Some(decryption_key) = backup_keys.decryption_key {
             if let Some(version) = backup_keys.backup_version {
                 let request =
                     get_backup_keys_for_room::v3::Request::new(version, room_id.to_owned());
-                let response = self.client.send(request, Default::default()).await.unwrap();
+                let response = self.client.send(request, Default::default()).await?;
                 let response = get_backup_keys::v3::Response::new(BTreeMap::from([(
                     room_id,
                     RoomKeyBackup::new(response.sessions),
                 )]));
 
-                self.handle_downloaded_room_keys(response, decryption_key, olm_machine).await
+                self.handle_downloaded_room_keys(response, decryption_key, olm_machine).await?;
             }
         }
+
+        Ok(())
     }
 
-    pub async fn download_room_key(&self, room_id: OwnedRoomId, session_id: String) {
+    pub async fn download_room_key(
+        &self,
+        room_id: OwnedRoomId,
+        session_id: String,
+    ) -> Result<(), crate::Error> {
         let olm_machine = self.client.olm_machine().await;
-        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
+        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine)?;
 
-        let backup_keys = olm_machine.store().load_backup_keys().await.unwrap();
+        let backup_keys = olm_machine.store().load_backup_keys().await?;
 
         if let Some(decryption_key) = backup_keys.decryption_key {
             if let Some(version) = backup_keys.backup_version {
@@ -590,29 +620,33 @@ impl Backups {
                     room_id.to_owned(),
                     session_id.to_owned(),
                 );
-                let response = self.client.send(request, Default::default()).await.unwrap();
+                let response = self.client.send(request, Default::default()).await?;
                 let response = get_backup_keys::v3::Response::new(BTreeMap::from([(
                     room_id,
                     RoomKeyBackup::new(BTreeMap::from([(session_id, response.key_data)])),
                 )]));
 
-                self.handle_downloaded_room_keys(response, decryption_key, olm_machine).await;
+                self.handle_downloaded_room_keys(response, decryption_key, olm_machine).await?;
             }
         }
+
+        Ok(())
     }
 
     pub async fn download_all_room_keys(
         &self,
         decryption_key: BackupDecryptionKey,
         version: String,
-    ) {
+    ) -> Result<(), crate::Error> {
         let request = get_backup_keys::v3::Request::new(version);
-        let response = self.client.send(request, Default::default()).await.unwrap();
+        let response = self.client.send(request, Default::default()).await?;
 
         let olm_machine = self.client.olm_machine().await;
-        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
+        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine)?;
 
-        self.handle_downloaded_room_keys(response, decryption_key, olm_machine).await;
+        self.handle_downloaded_room_keys(response, decryption_key, olm_machine).await?;
+
+        Ok(())
     }
 
     pub fn state_stream(
