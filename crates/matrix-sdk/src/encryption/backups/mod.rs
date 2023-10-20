@@ -298,10 +298,10 @@ impl Backups {
         let stored_keys = olm_machine.backup_machine().get_backup_keys().await?;
 
         let ret = if stored_keys.backup_version.as_ref() == Some(&current_version.version)
-            // TODO: This isn't right because the base64 might be padded or unpadded.
-            && stored_keys.decryption_key.as_ref() == Some(&decryption_key)
+            && self.is_enabled().await
         {
-            todo!("Backups are already enabled")
+            self.set_state(BackupState::Enabled);
+            return Ok(true);
         } else if decryption_key.backup_key_matches(&backup_info) {
             info!(
                 "We have found the correct backup recovery key, storing the backup recovery key \
@@ -500,14 +500,10 @@ impl Backups {
     pub(crate) async fn backup_room_keys(&self) -> Result<(), crate::Error> {
         // TODO: Lock this, so we're uploading only one per client.
 
-        trace!("Looking if we need to upload some room keys");
-
         let olm_machine = self.client.olm_machine().await;
         let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine)?;
 
         let old_counts = olm_machine.backup_machine().room_key_counts().await?;
-
-        trace!(?old_counts, "Checking the old counts");
 
         self.client
             .inner
@@ -534,8 +530,6 @@ impl Backups {
             #[cfg(not(target_arch = "wasm32"))]
             tokio::time::sleep(self.client.inner.backups_state.upload_delay).await;
         }
-
-        trace!("No more key to upload");
 
         self.client.inner.backups_state.upload_progress.set(UploadState::Done);
 

@@ -69,18 +69,12 @@ impl BackupUploadingTask {
 
     pub async fn listen(client: Weak<ClientInner>, mut receiver: UnboundedReceiver<()>) {
         while receiver.recv().await.is_some() {
-            trace!("Received a command to backup room keys");
-
             if let Some(client) = client.upgrade() {
-                trace!("Found a client, trying to backup some room keys");
-
                 let client = Client { inner: client };
 
                 if let Err(e) = client.encryption().backups().backup_room_keys().await {
                     warn!("Error backing up room keys {e:?}");
                 }
-
-                trace!("Done backing up, going back to idle");
 
                 client.inner.backups_state.upload_progress.set(UploadState::Idle);
             } else {

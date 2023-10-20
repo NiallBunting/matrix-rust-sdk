@@ -127,7 +127,7 @@ impl Recovery {
         Ok(devices.devices().count() == 1)
     }
 
-    pub async fn is_recovery_setup(&self) -> Result<bool> {
+    pub async fn is_recovery_enabled(&self) -> Result<bool> {
         let disabled_content = self
             .client
             .account()
