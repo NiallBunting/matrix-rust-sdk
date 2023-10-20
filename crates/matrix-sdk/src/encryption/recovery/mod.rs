@@ -44,6 +44,12 @@ struct SecretStorageDisabledContent {
     disabled: bool,
 }
 
+impl SecretStorageDisabledContent {
+    fn event_type() -> GlobalAccountDataEventType {
+        Self { disabled: false }.event_type()
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, EventContent)]
 #[ruma_event(type = "m.org.matrix.custom.backup_disabled", kind = GlobalAccountData)]
 struct BackupDisabledContent {
@@ -121,12 +127,29 @@ impl Recovery {
         Ok(devices.devices().count() == 1)
     }
 
-    pub async fn are_we_allowed_to_reset_the_key_without_the_old_one(&self) -> Result<bool> {
-        todo!()
-    }
-
     pub async fn is_recovery_setup(&self) -> Result<bool> {
-        todo!()
+        let disabled_content = self
+            .client
+            .account()
+            .account_data_raw(SecretStorageDisabledContent::event_type())
+            .await?;
+
+        let disabled_content = if let Some(disabled_content) = disabled_content {
+            Some(disabled_content)
+        } else {
+            self.client
+                .account()
+                .fetch_account_data(SecretStorageDisabledContent::event_type())
+                .await?
+        };
+
+        if let Some(disabled_content) = disabled_content {
+            let content: SecretStorageDisabledContent = disabled_content.deserialize_as()?;
+
+            Ok(content.disabled)
+        } else {
+            self.client.encryption().secret_storage().is_enabled().await
+        }
     }
 
     /// Disable recovery completely.
@@ -148,41 +171,32 @@ impl Recovery {
         Ok(())
     }
 
+    /// Reset the recovery key but first import all the secrets from foobar.
+    pub async fn recover_and_reset(
+        &self,
+        old_key: &str,
+        new_passphrase: Option<&str>,
+    ) -> Result<String> {
+        self.fix_recovery_issues(old_key).await?;
+        self.reset_key(new_passphrase).await
+    }
+
     /// Reset the recovery key.
     ///
     /// This will rotate the secret storage key and re-upload all the secrets to
     /// the [`SecretStore`].
     pub async fn reset_key(&self, passphrase: Option<&str>) -> Result<String> {
-        // Only do this if we have all the secrets at hand:
-        //
-        // 1. Cross-signing keys
-        // 2. Backup recovery key
+        let store = self
+            .client
+            .encryption()
+            .secret_storage()
+            .create_secret_store(passphrase)
+            .await
+            .unwrap();
 
-        // TODO: The `true` here should be replaced with a call to a
-        // `do_we_have_all_the_secrets_locally()` method.
-        if true {
-            let store = self
-                .client
-                .encryption()
-                .secret_storage()
-                .create_secret_store(passphrase)
-                .await
-                .unwrap();
+        self.mark_secret_storage_as_enabled().await?;
 
-            self.mark_secret_storage_as_enabled().await?;
-
-            Ok(store.secret_storage_key())
-        } else {
-            // TODO: The else case should open the currently active secret store, the user
-            // needs to enter the recovery key, wait a minute!?!? Another case
-            // where we do ENTER the existing recovery key??! The product requirement doc
-            // tells us this:
-            // > Requires the device to be trusted. Otherwise an existing recovery key is required.
-            //
-            // What happens if you don't know the recovery key and are not a trusted device
-            // and are the last device?!?
-            todo!("How do we let the user enter the current key here?")
-        }
+        Ok(store.secret_storage_key())
     }
 
     /// What the fuck is this supposed to do if not fetch the secrets from

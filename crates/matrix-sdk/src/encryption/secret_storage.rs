@@ -247,7 +247,7 @@ impl SecretStorage {
     }
 
     /// Is secret storage set up for this user?
-    pub async fn is_enabled(&self) -> Result<bool> {
+    pub async fn is_enabled(&self) -> crate::Result<bool> {
         // Since account data events cannot be disabled we can be sure that if the event
         // is in the store, secret storage was at some point enabled.
         //
@@ -268,6 +268,30 @@ impl SecretStorage {
                 .is_some())
         } else {
             Ok(true)
+        }
+    }
+
+    pub async fn are_known_secrets_cached_locally(&self) -> crate::Result<bool> {
+        let olm_machine = self.client.olm_machine().await;
+        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine)?;
+
+        let cross_signing = olm_machine
+            .export_cross_signing_keys()
+            .await?
+            .map(|cross_signing_keys| {
+                cross_signing_keys.master_key.is_some()
+                    && cross_signing_keys.self_signing_key.is_some()
+                    && cross_signing_keys.user_signing_key.is_some()
+            })
+            .unwrap_or(false);
+
+        if self.client.encryption().backups().exists_on_server().await? {
+            // If backups are enabled and exist, we should have the key as well.
+            let backup_keys = olm_machine.backup_machine().get_backup_keys().await?;
+            Ok(backup_keys.decryption_key.is_some() && cross_signing)
+        } else {
+            // Otherwise, only the cross-signing keys are taken into account.
+            Ok(cross_signing)
         }
     }
 }
