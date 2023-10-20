@@ -108,7 +108,7 @@ impl From<recovery::EnableProgress> for EnableRecoveryProgress {
     }
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl Encryption {
     pub fn backup_state_listener(&self, listener: Box<dyn BackupStateListener>) -> Arc<TaskHandle> {
         let mut stream = self.inner.backups().state_stream();
