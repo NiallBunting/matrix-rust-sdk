@@ -24,7 +24,6 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use matrix_sdk_base::crypto::{
     backups::MegolmV1BackupKey,
-    olm::BackedUpRoomKey,
     store::{BackupDecryptionKey, RoomKeyCounts},
     types::RoomKeyBackupInfo,
     GossippedSecret, OlmMachine,
@@ -170,12 +169,15 @@ impl Backups {
         self.set_state(BackupState::Creating);
 
         let future = async {
-            let decryption_key = BackupDecryptionKey::new().unwrap();
+            let decryption_key = BackupDecryptionKey::new().expect(
+                "We should be able to generate enough randomness to \
+                 create a new backup recovery key",
+            );
 
             let backup_key = decryption_key.megolm_v1_public_key();
 
-            // TODO: Should we sign this? I guess we need to because other clients might
-            // expect the signature.
+            // TODO: We should sign this with our own device key and, if available, with our
+            // Master key. This is only for compat reasons important.
             let backup_info = decryption_key.as_room_key_backup_info();
 
             let algorithm = Raw::new(&backup_info)?.cast();
@@ -183,16 +185,18 @@ impl Backups {
             let response = self.client.send(request, Default::default()).await?;
             let version = response.version;
 
+            backup_key.set_version(version.to_owned());
+
             let olm_machine = self.client.olm_machine().await;
-            let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
+            let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine)?;
+
+            // TODO: This should remove the old stored key and version.
+            olm_machine.backup_machine().disable_backup().await?;
 
             olm_machine
                 .backup_machine()
-                .save_decryption_key(Some(decryption_key), Some(version.to_owned()))
+                .save_decryption_key(Some(decryption_key), Some(version))
                 .await?;
-
-            backup_key.set_version(version);
-            olm_machine.backup_machine().disable_backup().await?;
 
             self.enable(olm_machine, backup_key).await?;
 
@@ -216,7 +220,7 @@ impl Backups {
 
         let future = async {
             let olm_machine = self.client.olm_machine().await;
-            let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
+            let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine)?;
 
             let backup_keys = olm_machine.backup_machine().get_backup_keys().await?;
 
@@ -241,6 +245,7 @@ impl Backups {
             } else {
                 info!("Backup is not enabled, can't disable it");
             }
+
             Ok(())
         };
 
@@ -266,7 +271,7 @@ impl Backups {
         Ok(())
     }
 
-    #[instrument]
+    #[instrument(skip_all)]
     pub(crate) async fn maybe_enable_backups(
         &self,
         maybe_recovery_key: &str,
@@ -276,15 +281,21 @@ impl Backups {
         self.set_state(BackupState::Enabling);
 
         let olm_machine = self.client.olm_machine().await;
-        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
+        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine)?;
 
         let decryption_key = BackupDecryptionKey::from_base64(maybe_recovery_key).unwrap();
 
-        let current_version = self.get_current_version().await.unwrap().unwrap();
-        let backup_info: RoomKeyBackupInfo = current_version.algorithm.deserialize_as().unwrap();
+        let current_version = self.get_current_version().await?;
+
+        let Some(current_version) = current_version else { todo!() };
+
+        Span::current().record("backup_version", &current_version.version);
+
+        let backup_info: RoomKeyBackupInfo = current_version.algorithm.deserialize_as()?;
         let stored_keys = olm_machine.backup_machine().get_backup_keys().await?;
 
         let ret = if stored_keys.backup_version.as_ref() == Some(&current_version.version)
+            // TODO: This isn't right because the base64 might be padded or unpadded.
             && stored_keys.decryption_key.as_ref() == Some(&decryption_key)
         {
             todo!("Backups are already enabled")
@@ -303,9 +314,8 @@ impl Backups {
                     Some(decryption_key.to_owned()),
                     Some(current_version.version.to_owned()),
                 )
-                .await
-                .unwrap();
-            olm_machine.backup_machine().enable_backup_v1(backup_key).await.unwrap();
+                .await?;
+            olm_machine.backup_machine().enable_backup_v1(backup_key).await?;
 
             // TODO: Download all keys now, or just leave this task for
             // when we have a decryption failure?
@@ -317,7 +327,12 @@ impl Backups {
 
             true
         } else {
+            let derived_key = decryption_key.megolm_v1_public_key();
+            let downloaded_key = current_version.algorithm;
+
             warn!(
+                ?derived_key,
+                ?downloaded_key,
                 "Found an active backup but the recovery key we received isn't the one used in \
                  this backup version"
             );
@@ -335,10 +350,13 @@ impl Backups {
         version: Option<String>,
     ) -> Result<bool, crate::Error> {
         let olm_machine = self.client.olm_machine().await;
-        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine).unwrap();
+        let olm_machine = olm_machine.as_ref().ok_or(crate::Error::NoOlmMachine)?;
 
-        let current_version = self.get_current_version().await.unwrap().unwrap();
-        let backup_info: RoomKeyBackupInfo = current_version.algorithm.deserialize_as().unwrap();
+        let current_version = self.get_current_version().await?;
+
+        let Some(current_version) = current_version else { todo!() };
+
+        let backup_info: RoomKeyBackupInfo = current_version.algorithm.deserialize_as()?;
 
         if decryption_key.backup_key_matches(&backup_info) {
             let backup_key = decryption_key.megolm_v1_public_key();
@@ -349,8 +367,7 @@ impl Backups {
                     olm_machine
                         .backup_machine()
                         .save_decryption_key(None, Some(current_version.version.to_owned()))
-                        .await
-                        .unwrap();
+                        .await?;
                 }
             }
 
@@ -385,7 +402,7 @@ impl Backups {
         &self,
         olm_machine: &OlmMachine,
     ) -> Result<bool, crate::Error> {
-        let backup_keys = olm_machine.store().load_backup_keys().await.unwrap();
+        let backup_keys = olm_machine.store().load_backup_keys().await?;
 
         if let Some(decryption_key) = backup_keys.decryption_key {
             self.maybe_resume_backup_from_decryption_key(decryption_key, backup_keys.backup_version)
@@ -515,11 +532,15 @@ impl Backups {
 
         for (room_id, room_keys) in backed_up_keys.rooms {
             for (session_id, room_key) in room_keys.sessions {
-                let room_key = room_key.deserialize().unwrap();
+                // TODO: Log that we're skipping some keys here.
+                let Ok(room_key) = room_key.deserialize() else { continue };
 
-                let room_key =
-                    backup_decryption_key.decrypt_session_data(room_key.session_data).unwrap();
-                let room_key: BackedUpRoomKey = serde_json::from_slice(&room_key).unwrap();
+                let Ok(room_key) =
+                    backup_decryption_key.decrypt_session_data(room_key.session_data)
+                else {
+                    continue;
+                };
+                let Ok(room_key) = serde_json::from_slice(&room_key) else { continue };
 
                 decrypted_room_keys
                     .entry(room_id.to_owned())
@@ -614,7 +635,7 @@ impl Backups {
         }
     }
 
-    pub(crate) async fn exists_on_server(&self) -> bool {
-        self.get_current_version().await.unwrap().is_some()
+    pub(crate) async fn exists_on_server(&self) -> Result<bool, crate::Error> {
+        Ok(self.get_current_version().await?.is_some())
     }
 }

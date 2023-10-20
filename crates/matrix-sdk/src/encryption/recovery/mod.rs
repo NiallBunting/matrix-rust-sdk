@@ -229,7 +229,7 @@ impl Recovery {
         // server and finally if backups have not been marked to be explicitly
         // disabled, then we can automatically enable them.
         Ok(!self.client.encryption().backups().is_enabled().await
-            && !self.client.encryption().backups().exists_on_server().await
+            && !self.client.encryption().backups().exists_on_server().await?
             && !self.are_backups_disabled().await?)
     }
 
